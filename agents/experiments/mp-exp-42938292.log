@@ -1,0 +1,18 @@
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1793915205.074694  488237 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+I0000 00:00:1793915205.256580  488237 cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1793915211.329871  488237 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+I0000 00:00:1793915211.336349  488237 cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+substrate=commons_harvest__open players=7 actions=8
+[random] ep=0 steps=1000 collective=187 (2152 steps/s)
+[random] ep=1 steps=1000 collective=134 (1521 steps/s)
+[random] ep=2 steps=1000 collective=184 (1765 steps/s)
+[no_zap] ep=0 steps=1000 collective=201 (1477 steps/s)
+[no_zap] ep=1 steps=1000 collective=224 (1410 steps/s)
+[no_zap] ep=2 steps=1000 collective=186 (1535 steps/s)
+
+Summary (collective return, mean ± std over episodes):
+  random    168.33 ± 24.31
+  no_zap    203.67 ± 15.63
+wrote agents/experiments/results/commons_harvest__open.csv

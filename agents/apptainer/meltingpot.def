@@ -1,0 +1,57 @@
+Bootstrap: docker
+From: python:3.14-slim-bookworm
+
+# Melting Pot container.
+#
+# Build (from the repo root, inside a Slurm job -- see build.sbatch):
+#   apptainer build agents/apptainer/meltingpot.sif agents/apptainer/meltingpot.def
+#
+# Installs the pinned, hash-checked dependencies from the meltingpot submodule's
+# requirements.txt (same procedure as meltingpot/bin/install.sh), then installs
+# the submodule itself (non-editable, so the downloaded assets are baked in).
+
+%files
+    meltingpot/setup.py          /opt/meltingpot-src/setup.py
+    meltingpot/pyproject.toml    /opt/meltingpot-src/pyproject.toml
+    meltingpot/README.md         /opt/meltingpot-src/README.md
+    meltingpot/LICENSE           /opt/meltingpot-src/LICENSE
+    meltingpot/requirements.txt  /opt/meltingpot-src/requirements.txt
+    meltingpot/meltingpot        /opt/meltingpot-src/meltingpot
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    # Runtime libs needed by opencv-python / pygame wheels.
+    apt-get update
+    apt-get install -y --no-install-recommends libgl1 libglib2.0-0 ffmpeg ca-certificates
+    rm -rf /var/lib/apt/lists/*
+
+    export PIP_NO_CACHE_DIR=1
+    python -m pip install --upgrade pip
+    cd /opt/meltingpot-src
+    pip install --no-deps --require-hashes --requirement requirements.txt
+    # Non-editable install: setup.py's BuildPy downloads the assets tarball
+    # and copies it into site-packages.
+    pip install --no-deps --no-build-isolation .
+    # Source tree (with ~assets) is no longer needed.
+    cd / && rm -rf /opt/meltingpot-src /tmp/meltingpot-assets-*.tar.gz
+    python -c "import meltingpot, dmlab2d; print('meltingpot OK', meltingpot.__file__)"
+
+%environment
+    export TF_CPP_MIN_LOG_LEVEL=3
+    export PYTHONUNBUFFERED=1
+    # Never let numeric libraries size themselves from the whole node.
+    export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
+    export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
+    export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}
+    export TF_NUM_INTRAOP_THREADS=${SLURM_CPUS_PER_TASK:-1}
+    export TF_NUM_INTEROP_THREADS=1
+
+%runscript
+    exec python "$@"
+
+%test
+    python -c "from meltingpot import substrate; print(len(substrate.SUBSTRATES), 'substrates available')"
+
+%labels
+    Description Melting Pot (google-deepmind/meltingpot submodule) on Python 3.14
