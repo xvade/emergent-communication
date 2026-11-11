@@ -2,3 +2,5 @@ recordings/
 experiments/results/recordings/
 *.npz
 *.log
+__pycache__/
+*.pyc
