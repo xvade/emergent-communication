@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mp-build
-#SBATCH --account=amath
-#SBATCH --partition=cpu-g2
+#SBATCH --account=stf
+#SBATCH --partition=compute
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=01:00:00

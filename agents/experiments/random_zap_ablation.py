@@ -21,6 +21,13 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 import numpy as np  # pylint: disable=g-import-not-at-top
 from meltingpot import substrate  # pylint: disable=g-import-not-at-top
 
+try:  # agents/ on PYTHONPATH (agents/bin launchers set this).
+  from mpviz import recording  # pylint: disable=g-import-not-at-top
+except ImportError:
+  import sys  # pylint: disable=g-import-not-at-top
+  sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+  from mpviz import recording  # pylint: disable=g-import-not-at-top
+
 
 def run_episode(env, rng, num_actions, allowed, max_steps):
   timestep = env.reset()
@@ -43,6 +50,11 @@ def main():
   p.add_argument("--steps", type=int, default=500)
   p.add_argument("--seed", type=int, default=0)
   p.add_argument("--out", default="results")
+  p.add_argument("--record", type=int, default=0,
+                 help="save the first N episodes per condition for replay "
+                      "(to <out>/recordings; view with agents/bin/mp-replay)")
+  p.add_argument("--record-player-views", action="store_true",
+                 help="also record each player's egocentric view")
   args = p.parse_args()
   os.makedirs(args.out, exist_ok=True)
 
@@ -59,11 +71,19 @@ def main():
   }
   rows = []
   rng = np.random.default_rng(args.seed)
+  saved = []
   for cond, allowed in conditions.items():
+    rec_env = None
+    if args.record:
+      rec_env = recording.wrap(
+          env, os.path.join(args.out, "recordings"), substrate=args.substrate,
+          tag=cond, max_episodes=args.record,
+          record_player_views=args.record_player_views,
+          extra_meta={"condition": cond, "seed": args.seed})
     for ep in range(args.episodes):
       t0 = time.time()
-      returns, steps, frame = run_episode(env, rng, num_actions, allowed,
-                                          args.steps)
+      returns, steps, frame = run_episode(rec_env or env, rng, num_actions,
+                                          allowed, args.steps)
       dt = time.time() - t0
       rows.append({"condition": cond, "episode": ep, "steps": steps,
                    "collective_return": returns.sum(),
@@ -75,6 +95,9 @@ def main():
         import cv2  # pylint: disable=g-import-not-at-top
         cv2.imwrite(os.path.join(args.out, f"final_frame_{cond}.png"),
                     cv2.cvtColor(np.asarray(frame), cv2.COLOR_RGB2BGR))
+    if rec_env is not None:
+      rec_env.flush()  # episodes cut off by --steps never reach last()
+      saved += rec_env.saved
   env.close()
 
   path = os.path.join(args.out, f"{args.substrate}.csv")
@@ -89,6 +112,8 @@ def main():
                      if r["condition"] == cond])
     print(f"  {cond:7s} {vals.mean():8.2f} ± {vals.std():.2f}")
   print(f"wrote {path}")
+  for s in saved:
+    print(f"recorded {s}")
 
 
 if __name__ == "__main__":

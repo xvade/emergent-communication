@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mp-exp
-#SBATCH --account=amath
-#SBATCH --partition=cpu-g2
+#SBATCH --account=stf
+#SBATCH --partition=compute
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=00:30:00

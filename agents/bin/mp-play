@@ -1,0 +1,19 @@
+#!/bin/bash
+# Play a Melting Pot substrate as a human, in your browser.
+#
+#   agents/bin/mp-play                                  # commons_harvest__open
+#   agents/bin/mp-play --substrate clean_up
+#   agents/bin/mp-play -p cpu-g2 -A stf -t 120 --substrate territory__rooms
+#   agents/bin/mp-play --list
+#
+# Slurm flags: -A/--account, -p/--partition, -t/--minutes (default 60).
+# Everything else goes to mpviz.play_server (see --help).
+#
+# Run this on a klone login node. It requests a small Slurm allocation
+# (1 CPU, 6 GB), starts the play server inside the container, and prints the
+# SSH tunnel command + URL to open. Ctrl-C ends the job.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+MP_MINUTES=60
+mp_parse_args "$@"
+mp_run mp-play 6G -m mpviz.play_server ${MP_ARGS[@]+"${MP_ARGS[@]}"}

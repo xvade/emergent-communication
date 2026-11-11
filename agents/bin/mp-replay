@@ -1,0 +1,14 @@
+#!/bin/bash
+# Turn recordings (.npz) into self-contained HTML replays.
+#
+#   agents/bin/mp-replay agents/recordings/*.npz [--stride 2] [--no-player-views]
+#   agents/bin/mp-replay -p cpu-g2 run.npz
+#
+# Slurm flags: -A/--account, -p/--partition, -t/--minutes (default 30).
+# Runs as a short Slurm job (encoding thousands of PNGs is real work; keep it
+# off the login node). Writes <name>.html next to each .npz.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+MP_MINUTES=30
+mp_parse_args "$@"
+mp_run mp-replay 8G -m mpviz.replay_html ${MP_ARGS[@]+"${MP_ARGS[@]}"}
