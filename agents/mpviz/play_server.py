@@ -374,7 +374,8 @@ class Game:
       return self.info()
 
   def _fail(self):
-    self.error = traceback.format_exc()
+    # dmlab2d colors its Lua error lines with ANSI codes; strip them for HTML.
+    self.error = re.sub(r'\x1b\[[0-9;]*m', '', traceback.format_exc())
     print(f'[mp-play] error loading {self.level}:\n{self.error}', flush=True)
     self.rec = None
     if self.env is not None:
@@ -398,6 +399,7 @@ class Game:
       self.scores = collections.defaultdict(float)
       self.steps = 0
       self.done = False
+      self.end_reason = None
       self.rec = recording.EpisodeRecorder(
           substrate=self.level.split('.')[-1], fps=self.fps, source='human',
           record_player_views=self.player_views)
@@ -439,8 +441,21 @@ class Game:
                                     events=self._events())
       if self.timestep.step_type == dm_env.StepType.LAST:
         self.done = True
+        self.end_reason = self._why_ended()
         self._save_recording()
       return self.state(player)
+
+  def _why_ended(self):
+    try:
+      limit = int(self.env_config.lab2d_settings['maxEpisodeLengthFrames'])
+    except Exception:  # pylint: disable=broad-except
+      limit = None
+    if limit and self.steps >= limit:
+      return (f'Time limit reached: {self.steps} steps '
+              f'(maxEpisodeLengthFrames = {limit}).')
+    return (f'The game ended the episode at step {self.steps}'
+            + (f', before its {limit}-step limit' if limit else '')
+            + ' (e.g. simulation:endEpisode() or a win condition).')
 
   def view(self, player):
     """Current frame from `player`'s perspective, without stepping."""
@@ -450,6 +465,7 @@ class Game:
   def state(self, player):
     base = dict(level=self.level, step=getattr(self, 'steps', 0),
                 done=getattr(self, 'done', False), error=self.error,
+                end_reason=getattr(self, 'end_reason', None),
                 saving=self.saving, scores=[], player=None, world=None,
                 text='')
     if self.timestep is None:
@@ -495,6 +511,8 @@ class Game:
   def save_now(self):
     with self.lock:
       name = self._save_recording()
+      if not getattr(self, 'done', False):
+        self.end_reason = f'You ended the episode at step {self.steps}.'
       self.done = True
       return name
 
@@ -778,6 +796,8 @@ summary h2{display:inline}
 summary::before{content:"\u25b8 ";color:var(--muted)}
 details[open] summary::before{content:"\u25be "}
 #about{font-size:13px;white-space:pre-line;color:var(--fg)}
+.ended{border:1px solid var(--accent);border-left-width:4px;border-radius:6px;
+padding:10px 12px;margin:0 0 10px;background:var(--panel)}
 .err{background:#fde8e8;color:#8a1111;border:1px solid #f3b4b4;
 border-radius:6px;padding:8px;margin:0 0 10px;max-height:320px;overflow:auto;
 font-size:12px}
@@ -806,6 +826,15 @@ a{color:var(--accent)}
  <section class="card">
   <div id="source" class="muted" style="margin-bottom:8px" hidden></div>
   <pre id="error" class="err" hidden></pre>
+  <div id="ended" class="ended" hidden>
+   <div><b>Episode over.</b> <span id="end-reason"></span>
+    <span id="end-scores" class="muted"></span></div>
+   <div class="row" style="margin-top:8px">
+    <button id="restart" class="primary">Restart (Enter)</button>
+    <button id="restart-reload">Reload files &amp; restart</button>
+    <span id="end-replay" class="muted"></span>
+   </div>
+  </div>
   <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">
    <div id="pvbox"><div class="muted" style="margin-bottom:4px">Your view</div>
     <canvas id="pv"></canvas></div>
@@ -887,6 +916,15 @@ function render(s) {
   $('wtextbox').hidden = !s.text;
   $('wtext').textContent = s.text || '';
   done = s.done || !!s.error;
+  const over = s.done && !s.error;
+  $('ended').hidden = !over;
+  if (over) {
+    $('end-reason').textContent = s.end_reason || '';
+    $('end-scores').textContent = s.scores.length ? 'Final scores: ' +
+        s.scores.map((v, i) => 'P' + (i + 1) + ' ' + (+v.toFixed(2)))
+            .join(', ') : '';
+    $('restart-reload').hidden = !(info && info.custom);
+  }
   $('status').textContent = 'step ' + s.step + (s.done ? ' · episode over'
       : paused ? ' · paused' : '');
   $('scores').innerHTML = s.scores.map((v, i) =>
@@ -900,12 +938,20 @@ function render(s) {
       ? 'Saved: <a target="_blank" href="/replays/' + encodeURIComponent(last) +
         '?token=' + encodeURIComponent(TOKEN) + '">' + last + '</a>'
       : 'Replay ' + st + '…';
+    $('end-replay').innerHTML = over ? (st === 'ready' ? '<a target="_blank" ' +
+        'href="/replays/' + encodeURIComponent(last) + '?token=' +
+        encodeURIComponent(TOKEN) + '">Open the replay</a>' :
+        'Replay ' + st + '…') : '';
+    // The replay is written in the background; refresh until it's ready.
+    if (over && st === 'saving') setTimeout(showView, 1000);
   }
 }
 function showError(err) {
   $('error').hidden = !err;
-  $('error').textContent = err ? 'Could not load this game. Fix the file, ' +
-      'then click Reload files.\n\n' + err : '';
+  $('error').textContent = err ? 'The game hit an error. ' +
+      (info && info.custom ? 'Fix the file, then click Reload files.'
+                           : 'Click Rebuild to start it again.') +
+      ' The server is still running.\n\n' + err : '';
 }
 let viewSeq = 0;
 async function showView() {
@@ -960,7 +1006,10 @@ async function loadInfo(i) {
   $('source').innerHTML = i.source ? 'Loaded from <code>' + esc(i.source) +
       '</code> &middot; edit it (and its Lua level), then click ' +
       '<b>Reload files</b>.' : '';
-  $('reload').hidden = !i.custom;
+  $('reload').innerHTML = i.custom ? '&#8635; Reload files' : '&#8635; Rebuild';
+  $('reload').title = i.custom
+      ? 'Re-read the config and Lua files from disk and restart the episode'
+      : 'Rebuild the game from scratch (recovers from errors)';
   $('pvbox').hidden = !i.players;
   setPlayers(i.players);
   showError(i.error);
@@ -970,6 +1019,9 @@ async function loadInfo(i) {
 }
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
+  if (e.key === 'Enter' && !$('ended').hidden) {
+    e.preventDefault(); restart(); return;
+  }
   if (e.code === 'Tab') {
     e.preventDefault();
     if (info && info.players) switchPlayer((player + 1) % info.players);
@@ -991,8 +1043,14 @@ $('pause').onclick = () => { paused = !paused;
 $('turn').onchange = () => { schedule(); document.body.focus(); };
 $('player').onchange = e => { switchPlayer(+e.target.value);
                               document.body.focus(); };
-$('reset').onclick = async () => { render(await api('/reset', {}));
-                                   document.body.focus(); };
+async function restart() {
+  try { render(await api('/reset', {})); }
+  catch (e) { $('status').textContent = 'error: ' + e.message; }
+  document.body.focus();
+}
+$('reset').onclick = restart;
+$('restart').onclick = restart;
+$('restart-reload').onclick = () => $('reload').onclick();
 $('save').onclick = async () => { const r = await api('/save', {});
   done = true; render(await api('/step', {keys: [], player})); };
 $('level').onchange = async e => {

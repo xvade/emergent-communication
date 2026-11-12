@@ -127,12 +127,36 @@ for level in registry:
 # --- 2b. substrate tutorial: custom configs, reload, errors ---------------
 tut = {spec: ps.CustomConfig(spec) for spec in ps.TUTORIAL_CONFIGS}
 g = ps.Game(dict(tut, **registry), tmp, player_views=True)
-inf = g.load(ps.TUTORIAL_CONFIGS[0])  # the tutorial's starting (empty) game
-st = g.step(['w'], 0)
+# The tutorial's own harvest.py / levels/harvest are the user's work in
+# progress (possibly mid-edit), so tests never load them. The 0-player
+# starting point is tested with a pristine config on the untouched
+# harvest_finished level.
+empty_cfg = os.path.join(tmp, 'empty_harvest.py')
+with open(empty_cfg, 'w') as f:
+  f.write('''from ml_collections import config_dict
+
+def get_config():
+  config = config_dict.ConfigDict()
+  config.individual_observation_names = []
+  config.global_observation_names = ["WORLD.RGB"]
+  config.lab2d_settings = {
+      "levelName": "harvest_finished",
+      "levelDirectory": "examples/tutorial/harvest/levels",
+      "maxEpisodeLengthFrames": 100,
+      "numPlayers": 0,
+      "spriteSize": 8,
+      "simulation": {"map": " ", "prefabs": {}, "charPrefabMap": {}},
+  }
+  return config
+''')
+g0 = ps.Game({empty_cfg: ps.CustomConfig(empty_cfg)}, tmp)
+inf = g0.load(empty_cfg)
+st = g0.step(['w'], 0)
 check(inf['error'] is None and inf['players'] == 0 and st['world'] and
       st['step'] == 1,
-      f"tutorial start (empty game) loads: players={inf['players']} "
-      f"error={(inf['error'] or '')[-200:]!r}")
+      f"tutorial starting point (empty, 0 players) loads: "
+      f"players={inf['players']} error={(inf['error'] or '')[-200:]!r}")
+g0._close_env(save=False)
 inf = g.load(ps.TUTORIAL_CONFIGS[1])  # harvest_finished
 w0 = g.state(0)['player']
 moved = False
@@ -160,6 +184,16 @@ st = g.step(['w'], 0)
 check(inf['error'] is not None and st['error'] is not None and
       st['player'] is None,
       'broken config reports an error instead of crashing')
+lua_bad = src.replace('"component": "DensityRegrow"',
+                      '"component": "NoSuchComponent"')
+check(lua_bad != src, 'scratch config can reference a missing Lua component')
+with open(cfg, 'w') as f:
+  f.write(lua_bad)
+inf = g.load(cfg, save=False)
+err = inf['error'] or ''
+check('NoSuchComponent' in err and '\x1b' not in err,
+      f'Lua error reaches the page without terminal color codes: '
+      f'{err.strip().splitlines()[-1][:160] if err else None!r}')
 with open(cfg, 'w') as f:
   edited = re.sub(r'("maxEpisodeLengthFrames":\s*)1000', r'\g<1>3', src)
   check(edited != src, 'scratch config edit applied')
@@ -170,6 +204,19 @@ for _ in range(3):
 check(inf['error'] is None and st['done'],
       f"after fixing the file, Reload picks up the edit (3-step episode "
       f"done={st['done']}, step={st['step']})")
+check('Time limit reached' in (st['end_reason'] or ''),
+      f"end reason for time limit: {st['end_reason']!r}")
+g.steps = 2  # as if the game had ended early, e.g. simulation:endEpisode()
+check('game ended the episode at step 2' in g._why_ended(),
+      f'end reason for early end: {g._why_ended()!r}')
+st = g.reset()
+check(not st['done'] and st['end_reason'] is None and st['step'] == 0,
+      'restart clears the episode-over state')
+g.step([], 0)
+g.save_now()
+st = g.state(0)
+check(st['done'] and 'You ended the episode at step 1' in st['end_reason'],
+      f"end reason for End & save: {st['end_reason']!r}")
 g._close_env(save=False)
 
 # --- 3. experiment recording -> HTML replay --------------------------------
