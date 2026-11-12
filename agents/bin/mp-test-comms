@@ -1,0 +1,56 @@
+#!/bin/bash
+# Submit a Slurm job that tests every config in
+# meltingpot/meltingpot/configs/substrates/communication/ (from your checkout).
+#
+#   agents/bin/mp-test-comms                 # test all; returns right away
+#   agents/bin/mp-test-comms --wait          # ...and wait, print the results
+#   agents/bin/mp-test-comms toy             # only these configs
+#   agents/bin/mp-test-comms -p cpu-g2 -A stf -t 20m --wait
+#
+# Slurm flags: -A/--account, -p/--partition, -t/--time (default 30 min).
+# What is checked: see agents/tests/communication/check_substrate.py and the
+# game-specific checks_<name>.py files next to it. Exit status with --wait is
+# 0 if everything passed.
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
+MP_MINUTES="${MP_TIME:-30}"
+mp_parse_args "$@"
+
+WAIT=0
+NAMES=()
+for a in ${MP_ARGS[@]+"${MP_ARGS[@]}"}; do
+  case "$a" in
+    --wait) WAIT=1 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "Unknown option: $a" >&2; exit 2 ;;
+    *) NAMES+=("$a") ;;
+  esac
+done
+
+LOGDIR="$MP_REPO/agents/tests/communication/logs"
+mkdir -p "$LOGDIR"
+JOB=$(sbatch --parsable \
+  --account="$MP_ACCOUNT" --partition="$MP_PARTITION" \
+  --time="$MP_TIME_SLURM" --chdir="$MP_REPO" \
+  --output="$LOGDIR/%x-%j.log" \
+  "$MP_REPO/agents/tests/communication/test.sbatch" \
+  ${NAMES[@]+"${NAMES[@]}"})
+LOG="$LOGDIR/mp-test-comms-$JOB.log"
+echo "Submitted job $JOB (partition=$MP_PARTITION account=$MP_ACCOUNT," \
+     "time $(mp_time_label "$MP_TIME_SLURM"))."
+echo "Log: $LOG"
+if (( ! WAIT )); then
+  echo "Follow it with:  tail -f $LOG"
+  echo "Results:         grep -E '^(PASS|FAIL|SKIP|CRASH|-- )|SUMMARY' $LOG"
+  exit 0
+fi
+
+echo -n "Waiting for job $JOB"
+while squeue -h -j "$JOB" 2>/dev/null | grep -q .; do
+  echo -n "."; sleep 15
+done
+echo
+# Every check result plus the summary (the full log also has tracebacks).
+grep -E '^(== |-- |PASS|FAIL|CRASH|SKIP|RESULT)' "$LOG" || true
+sed -n '/^SUMMARY/,$p' "$LOG"
+grep -q '^OVERALL PASS' "$LOG"

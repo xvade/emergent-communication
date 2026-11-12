@@ -1,9 +1,11 @@
 # Shared settings for agents/bin launchers.
 #
 # Slurm placement, highest priority first:
-#   1. launcher flags:  -A/--account ACCT  -p/--partition PART  -t/--minutes N
-#   2. env vars:        MP_ACCOUNT, MP_PARTITION (e.g. in ~/.bashrc)
-#   3. defaults below:  account stf, partition compute
+#   1. launcher flags:  -A/--account ACCT  -p/--partition PART  -t/--time T
+#   2. env vars:        MP_ACCOUNT, MP_PARTITION, MP_TIME (e.g. in ~/.bashrc)
+#   3. defaults:        account stf, partition compute, time per launcher
+# T (how long to reserve) can be minutes (90), units (2h, 90m, 1h30m), or a
+# Slurm time (1:30:00, 1-00:00:00).
 # Run `hyakalloc` to see which account/partition pairs you can use.
 MP_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 MP_SIF="${MP_SIF:-$MP_REPO/agents/apptainer/meltingpot.sif}"
@@ -26,11 +28,36 @@ mp_parse_args() {
       --account=*)    MP_ACCOUNT="${1#*=}"; shift ;;
       -p|--partition) MP_PARTITION="$2"; shift 2 ;;
       --partition=*)  MP_PARTITION="${1#*=}"; shift ;;
-      -t|--minutes)   MP_MINUTES="$2"; shift 2 ;;
-      --minutes=*)    MP_MINUTES="${1#*=}"; shift ;;
+      -t|--time|--minutes)  MP_MINUTES="$2"; shift 2 ;;
+      --time=*|--minutes=*) MP_MINUTES="${1#*=}"; shift ;;
       *)              MP_ARGS+=("$1"); shift ;;
     esac
   done
+  MP_TIME_SLURM="$(mp_slurm_time "$MP_MINUTES")" || exit 2
+}
+
+# Converts 90 / 90m / 2h / 1h30m / 1:30:00 / 1-00:00:00 to a Slurm --time.
+mp_slurm_time() {
+  local t="$1" h m
+  if [[ "$t" =~ ^[0-9]+$ ]]; then echo "$t"                       # minutes
+  elif [[ "$t" =~ ^([0-9]+)h(([0-9]+)m?)?$ ]]; then               # 2h, 1h30m
+    h="${BASH_REMATCH[1]}"; m="${BASH_REMATCH[3]:-0}"
+    echo $(( h * 60 + m ))
+  elif [[ "$t" =~ ^([0-9]+)m$ ]]; then echo "${BASH_REMATCH[1]}"  # 90m
+  elif [[ "$t" =~ ^([0-9]+-)?[0-9]+(:[0-9]+){0,2}$ ]]; then echo "$t"  # Slurm
+  else
+    echo "Bad time '$t': use minutes (90), 2h, 90m, 1h30m, or 1:30:00." >&2
+    return 1
+  fi
+}
+
+# Human-readable form of a Slurm time, for messages.
+mp_time_label() {
+  local t="$1"
+  if [[ "$t" =~ ^[0-9]+$ ]]; then
+    if (( t >= 60 )); then printf '%dh%02dm' $((t / 60)) $((t % 60))
+    else printf '%dm' "$t"; fi
+  else printf '%s' "$t"; fi
 }
 
 # Run python inside the container with the repo bound and agents/ importable.
@@ -52,7 +79,7 @@ mp_run() {
     mp_python "$@"
     return
   fi
-  echo "Requesting 1 CPU / $mem for ${MP_MINUTES} min:" \
+  echo "Requesting 1 CPU / $mem for $(mp_time_label "$MP_TIME_SLURM"):" \
        "partition=$MP_PARTITION account=$MP_ACCOUNT" >&2
   # Re-enter this script's helpers inside the allocation. Arguments are
   # passed as real argv, so none are added or lost.
@@ -63,7 +90,7 @@ mp_run() {
   # through untouched; the play server saves and exits on SIGUSR1.
   # A second Ctrl-C force-stops the job.
   srun --account="$MP_ACCOUNT" --partition="$MP_PARTITION" \
-    --cpus-per-task=1 --mem="$mem" --time="$MP_MINUTES" \
+    --cpus-per-task=1 --mem="$mem" --time="$MP_TIME_SLURM" \
     --job-name="$name" --unbuffered \
     bash -c 'source "$0"; MP_EXEC=exec mp_python "$@"' \
     "$MP_REPO/agents/bin/_common.sh" "$@" &

@@ -219,6 +219,16 @@ check(st['done'] and 'You ended the episode at step 1' in st['end_reason'],
       f"end reason for End & save: {st['end_reason']!r}")
 g._close_env(save=False)
 
+# --- 2c. substrate-style custom config (get_config + build) -------------
+sub_cfg = str(ps.MP_SOURCE / 'meltingpot/configs/substrates/clean_up.py')
+g = ps.Game({sub_cfg: ps.CustomConfig(sub_cfg)}, tmp)
+inf = g.load(sub_cfg)
+st = g.step(['w'], 0)
+check(inf['error'] is None and inf['players'] == 7 and st['step'] == 1,
+      f"--config with a get_config()+build() substrate loads: "
+      f"players={inf['players']} error={(inf['error'] or '')[-200:]!r}")
+g._close_env(save=False)
+
 # --- 3. experiment recording -> HTML replay --------------------------------
 from meltingpot import substrate
 env = substrate.build('commons_harvest__open',

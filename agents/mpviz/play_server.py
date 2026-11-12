@@ -49,6 +49,7 @@ import pygame  # pylint: disable=g-import-not-at-top
 
 from mpviz import recording  # pylint: disable=g-import-not-at-top
 from mpviz import replay_html  # pylint: disable=g-import-not-at-top
+from mpviz import source  # pylint: disable=g-import-not-at-top
 
 
 # --------------------------------------------------------------------------
@@ -214,8 +215,7 @@ def build_env_config(play_mod, env_module):
 # Custom configs (e.g. the substrate tutorial), loaded from the meltingpot/
 # source checkout and re-read from disk on every (re)load.
 # --------------------------------------------------------------------------
-# <repo>/meltingpot: the git submodule, not the copy installed in the image.
-MP_SOURCE = pathlib.Path(__file__).resolve().parents[2] / 'meltingpot'
+MP_SOURCE = source.MP_SOURCE
 
 TUTORIAL_CONFIGS = (
     'examples.tutorial.harvest.configs.environment.harvest',
@@ -237,32 +237,34 @@ class CustomConfig:
     self.play_path = self._to_path(play_module) if play_module else None
     self._play_mod = None
 
-  @staticmethod
-  def _to_path(spec):
-    if spec.endswith('.py') or '/' in spec:
-      return pathlib.Path(spec).resolve()
-    return MP_SOURCE / (spec.replace('.', '/') + '.py')
-
-  @staticmethod
-  def _exec(path, name):
-    """Freshly executes a module from its source file.
-
-    Compiles the source directly instead of importing, so no stale bytecode
-    cache can be used (__pycache__ validation is by mtime-in-seconds + size,
-    which a quick, same-length edit can fool).
-    """
-    path = pathlib.Path(path)
-    mod = types.ModuleType(name)
-    mod.__file__ = str(path)
-    exec(compile(path.read_text(), str(path), 'exec'), mod.__dict__)  # pylint: disable=exec-used
-    return mod
+  _to_path = staticmethod(source.to_path)
+  _exec = staticmethod(source.load_module)
 
   def load_config(self):
-    """Re-reads the config file from disk; returns (module, config)."""
+    """Re-reads the config file from disk; returns (module, config).
+
+    Two config styles are supported:
+      * tutorial style: get_config() returns lab2d_settings directly;
+      * substrate style (like Melting Pot's own configs): get_config() plus
+        build(roles, config), called here with the default player roles.
+    """
     if not self.path.is_file():
       raise FileNotFoundError(f'config file not found: {self.path}')
     mod = self._exec(self.path, f'mpviz_custom_{self.path.stem}')
-    return mod, mod.get_config()
+    config = mod.get_config()
+    if 'lab2d_settings' not in config:
+      if not callable(getattr(mod, 'build', None)):
+        raise ValueError(
+            f'{self.path.name}: get_config() has no lab2d_settings and the '
+            'module has no build(roles, config) function to make them.')
+      if 'default_player_roles' not in config:
+        raise ValueError(
+            f'{self.path.name}: has build() but get_config() sets no '
+            'default_player_roles, so the number of players is unknown.')
+      roles = tuple(config.default_player_roles)
+      with config_dict.ConfigDict(config).unlocked() as config:
+        config.lab2d_settings = mod.build(roles=roles, config=config)
+    return mod, config
 
   def play_mod(self):
     """Action map holder: --play-module if given, else WASD + Q/E."""
@@ -284,12 +286,8 @@ class CustomConfig:
     # The builder resolves `levelDirectory` against the root of the
     # *installed* meltingpot package. Point it at the source checkout while
     # building, so the edited tutorial Lua files (and their `require`s) load.
-    old = builder._MELTINGPOT_ROOT  # pylint: disable=protected-access
-    builder._MELTINGPOT_ROOT = str(MP_SOURCE)  # pylint: disable=protected-access
-    try:
+    with source.source_levels():
       return builder.builder(**env_config)
-    finally:
-      builder._MELTINGPOT_ROOT = old  # pylint: disable=protected-access
 
 
 def _png(frame, level=1):

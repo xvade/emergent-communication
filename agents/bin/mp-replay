@@ -4,11 +4,12 @@
 #   agents/bin/mp-replay agents/recordings/*.npz [--stride 2] [--no-player-views]
 #   agents/bin/mp-replay -p cpu-g2 run.npz
 #
-# Slurm flags: -A/--account, -p/--partition, -t/--minutes (default 30).
+# Slurm flags: -A/--account, -p/--partition, -t/--time (default 30 min;
+#   e.g. -t 1h, -t 45).
 # Runs as a short Slurm job (encoding thousands of PNGs is real work; keep it
 # off the login node). Writes <name>.html next to each .npz.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
-MP_MINUTES=30
+MP_MINUTES="${MP_TIME:-30}"
 mp_parse_args "$@"
 mp_run mp-replay 8G -m mpviz.replay_html ${MP_ARGS[@]+"${MP_ARGS[@]}"}

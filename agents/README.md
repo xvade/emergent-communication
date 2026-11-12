@@ -8,6 +8,7 @@
 | `mpviz/` | Python package behind both (`recording`, `replay_html`, `play_server`) |
 | `experiments/` | Experiments (e.g. `random_zap_ablation.py`, `run.sbatch`) |
 | `tests/smoke_mpviz.py` | End-to-end check of mpviz (`sbatch agents/tests/smoke.sbatch`) |
+| `bin/mp-test-comms` | Slurm job that tests the configs in `configs/substrates/communication/` |
 
 All commands below are run **from the repo root on a klone login node**. The
 launchers request their own small Slurm allocation; nothing heavy runs on the
@@ -23,8 +24,10 @@ login node.
 > ```
 >
 > or set a personal default in `~/.bashrc`:
-> `export MP_ACCOUNT=stf MP_PARTITION=cpu-g2`. Run `hyakalloc` to see what you
-> can use. `-t/--minutes` sets the time limit. If `compute` is full, `-p ckpt`
+> `export MP_ACCOUNT=stf MP_PARTITION=cpu-g2 MP_TIME=2h`. Run `hyakalloc` to
+> see what you can use. `-t/--time` sets how long to reserve: minutes (`90`),
+> `2h`, `90m`, `1h30m`, or a Slurm time (`1:30:00`). Defaults are 60 min for
+> `mp-play` and 30 for `mp-replay`. If `compute` is full, `-p ckpt`
 > uses idle nodes cluster-wide. Jobs there can be preempted, which is fine
 > for short play or replay sessions.
 
@@ -39,7 +42,7 @@ login node.
 ```bash
 agents/bin/mp-play                                   # commons_harvest__open
 agents/bin/mp-play --substrate clean_up
-agents/bin/mp-play -t 120 --substrate territory__rooms   # 2-hour job
+agents/bin/mp-play -t 2h --substrate territory__rooms    # 2-hour job
 agents/bin/mp-play --list                            # all playable substrates
 ```
 
@@ -73,7 +76,7 @@ focus.
 - **Ctrl-C** (once) in the klone terminal saves the current episode, stops
   the server and releases the allocation. Press it again to force-stop
   without saving. The server also saves and exits after 30 idle minutes
-  (`--idle-minutes`). When the `-t/--minutes` time limit runs out it tries
+  (`--idle-minutes`). When the `-t/--time` limit runs out it tries
   to save, but Slurm allows only about 12 s before killing the job, so save
   long episodes yourself first.
 
@@ -222,6 +225,44 @@ agents/bin/mp-play --config path/to/my_game.py --play-module path/to/play_my_gam
 > Tip: the tutorial edits files inside the `meltingpot/` submodule (your
 > fork). Work on a branch there, e.g. `git -C meltingpot switch -c tutorial`,
 > to keep its `main` clean.
+
+## 4. Test the communication substrates
+
+```bash
+agents/bin/mp-test-comms --wait          # test every config, wait for results
+agents/bin/mp-test-comms toy             # just these; returns right away
+agents/bin/mp-test-comms -p cpu-g2 -t 20m --wait
+```
+
+This submits a Slurm job (default 30 min, same `-A/-p/-t` flags as the other
+launchers). The job tests every `.py` in
+`meltingpot/meltingpot/configs/substrates/communication/`, loading the
+config and its Lua straight from your checkout, so it sees your latest edits
+without a container rebuild. Each check prints `PASS`, `FAIL` or `SKIP`. With
+`--wait`, the exit status is 0 only if everything passed. The full log, with
+tracebacks, is in `agents/tests/communication/logs/`.
+
+Each config is checked in four groups:
+- **Level:** the config loads, and its Lua runs 3 full episodes with
+  random actions. This catches runtime errors in callbacks.
+- **Substrate:** the fields `substrate.build` needs (`action_set`,
+  `action_spec`, `timestep_spec`, roles, `build()`), then the same checks as
+  Melting Pot's `substrate_test.py` (specs match what the environment
+  produces), plus a step with every action.
+- **Registration:** how it's listed in `SUBSTRATES`.
+- **Game logic:** `agents/tests/communication/checks_<name>.py`, if present.
+  For the toy, that file checks:
+  - spawning: one player per room
+  - apple frequency against `existsProb`
+  - each pad pays the right reward and ends the episode, for every apple
+    and pad combination
+  - the time limit
+  - neither player can see the other room
+
+Each config runs in its own process, so a game that crashes the engine is
+reported as `CRASH` (with a pointer to the Lua `ERROR:` lines) and the other
+configs still run. Lua errors inside callbacks such as `onEnter` abort the
+process instead of raising.
 
 ## Troubleshooting
 
