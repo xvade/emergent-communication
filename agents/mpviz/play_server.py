@@ -17,6 +17,7 @@ import importlib
 import inspect
 import json
 import os
+import pathlib
 import pkgutil
 import re
 import secrets
@@ -26,6 +27,7 @@ import sys
 import threading
 import time
 import traceback
+import types
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -208,12 +210,110 @@ def build_env_config(play_mod, env_module):
   return env_config
 
 
+# --------------------------------------------------------------------------
+# Custom configs (e.g. the substrate tutorial), loaded from the meltingpot/
+# source checkout and re-read from disk on every (re)load.
+# --------------------------------------------------------------------------
+# <repo>/meltingpot: the git submodule, not the copy installed in the image.
+MP_SOURCE = pathlib.Path(__file__).resolve().parents[2] / 'meltingpot'
+
+TUTORIAL_CONFIGS = (
+    'examples.tutorial.harvest.configs.environment.harvest',
+    'examples.tutorial.harvest.configs.environment.harvest_finished',
+)
+
+
+class CustomConfig:
+  """A game defined by a `get_config()` module, e.g. the tutorial's harvest.py.
+
+  Configs like the tutorial's return a complete config (lab2d_settings
+  included) and point `levelDirectory` at Lua files relative to the
+  meltingpot source root, exactly as `play_harvest.py` expects.
+  """
+
+  def __init__(self, spec, play_module=None):
+    self.spec = spec
+    self.path = self._to_path(spec)
+    self.play_path = self._to_path(play_module) if play_module else None
+    self._play_mod = None
+
+  @staticmethod
+  def _to_path(spec):
+    if spec.endswith('.py') or '/' in spec:
+      return pathlib.Path(spec).resolve()
+    return MP_SOURCE / (spec.replace('.', '/') + '.py')
+
+  @staticmethod
+  def _exec(path, name):
+    """Freshly executes a module from its source file.
+
+    Compiles the source directly instead of importing, so no stale bytecode
+    cache can be used (__pycache__ validation is by mtime-in-seconds + size,
+    which a quick, same-length edit can fool).
+    """
+    path = pathlib.Path(path)
+    mod = types.ModuleType(name)
+    mod.__file__ = str(path)
+    exec(compile(path.read_text(), str(path), 'exec'), mod.__dict__)  # pylint: disable=exec-used
+    return mod
+
+  def load_config(self):
+    """Re-reads the config file from disk; returns (module, config)."""
+    if not self.path.is_file():
+      raise FileNotFoundError(f'config file not found: {self.path}')
+    mod = self._exec(self.path, f'mpviz_custom_{self.path.stem}')
+    return mod, mod.get_config()
+
+  def play_mod(self):
+    """Action map holder: --play-module if given, else WASD + Q/E."""
+    if self._play_mod is None:
+      if self.play_path:
+        self._play_mod = self._exec(self.play_path,
+                                    f'mpviz_play_{self.play_path.stem}')
+      else:
+        # Same map as examples/tutorial/harvest/play_harvest.py.
+        self._play_mod = types.SimpleNamespace(
+            __name__='default_controls', FRAMES_PER_SECOND=8,
+            _ACTION_MAP={
+                'move': level_playing_utils.get_direction_pressed,
+                'turn': level_playing_utils.get_turn_pressed,
+            })
+    return self._play_mod
+
+  def build(self, env_config):
+    # The builder resolves `levelDirectory` against the root of the
+    # *installed* meltingpot package. Point it at the source checkout while
+    # building, so the edited tutorial Lua files (and their `require`s) load.
+    old = builder._MELTINGPOT_ROOT  # pylint: disable=protected-access
+    builder._MELTINGPOT_ROOT = str(MP_SOURCE)  # pylint: disable=protected-access
+    try:
+      return builder.builder(**env_config)
+    finally:
+      builder._MELTINGPOT_ROOT = old  # pylint: disable=protected-access
+
+
 def _png(frame, level=1):
   ok, buf = cv2.imencode('.png', cv2.cvtColor(np.asarray(frame),
                                               cv2.COLOR_RGB2BGR),
                          [cv2.IMWRITE_PNG_COMPRESSION, level])
   assert ok
   return base64.b64encode(buf.tobytes()).decode('ascii')
+
+
+def _text(value):
+  """WORLD.TEXT (a string/bytes scalar or array) -> str."""
+  if value is None:
+    return ''
+  if isinstance(value, np.ndarray):
+    if value.ndim == 0:
+      value = value.item()
+    elif value.dtype.kind in 'US':
+      value = '\n'.join(_text(v) for v in value.ravel())
+    else:
+      value = bytes(value.astype(np.uint8).ravel())
+  if isinstance(value, bytes):
+    value = value.decode('utf-8', 'replace')
+  return str(value)
 
 
 # --------------------------------------------------------------------------
@@ -223,40 +323,83 @@ class Game:
   """One substrate instance driven by browser key state."""
 
   def __init__(self, registry, record_dir, player_views=True):
+    # registry: name -> (play_mod, env_module) for built-in games, or
+    #           name -> CustomConfig for configs loaded from files.
     self.registry = registry
     self.record_dir = record_dir
     self.player_views = player_views
     self.lock = threading.RLock()
     self.env = None
     self.level = None
+    self.error = None
+    self.timestep = None
+    self.prefixes = []
+    self.unbound = []
+    self.rec = None
     self.saving = {}  # replay name -> status
 
   # -- lifecycle -----------------------------------------------------------
-  def load(self, level):
+  def load(self, level, save=True):
+    """(Re)builds `level` from disk. Errors are kept, not raised."""
     with self.lock:
       if level not in self.registry:
         raise KeyError(f'unknown substrate {level!r}')
-      self._close_env(save=True)
-      play_mod, env_module = self.registry[level]
+      self._close_env(save=save)
+      self.rec = None
       self.level = level
-      self.play_mod = play_mod
-      self.fps = int(getattr(play_mod, 'FRAMES_PER_SECOND', 8))
-      self.env_config = build_env_config(play_mod, env_module)
-      self.env = builder.builder(**self.env_config)
-      self.reader = level_playing_utils.ActionReader(
-          self.env, play_mod._ACTION_MAP)  # pylint: disable=protected-access
-      self.reset()
+      self.error = None
+      self.timestep = None
+      self.prefixes = []
+      entry = self.registry[level]
+      try:
+        if isinstance(entry, CustomConfig):
+          self.play_mod = entry.play_mod()
+          self.about_mod, self.env_config = entry.load_config()
+          self.env = entry.build(self.env_config)
+        else:
+          self.play_mod, self.about_mod = entry
+          self.env_config = build_env_config(*entry)
+          self.env = builder.builder(**self.env_config)
+        self.fps = int(getattr(self.play_mod, 'FRAMES_PER_SECOND', 8))
+        # Actions the game has but no key is bound to always send 0.
+        action_map = dict(self.play_mod._ACTION_MAP)  # pylint: disable=protected-access
+        names = {k.split('.', 1)[1] for k in self.env.action_spec()}
+        self.unbound = sorted(names - set(action_map))
+        for name in self.unbound:
+          action_map[name] = lambda: 0
+        self.reader = level_playing_utils.ActionReader(self.env, action_map)
+        self.reset()
+      except Exception:  # pylint: disable=broad-except
+        self._fail()
+      return self.info()
+
+  def _fail(self):
+    self.error = traceback.format_exc()
+    print(f'[mp-play] error loading {self.level}:\n{self.error}', flush=True)
+    self.rec = None
+    if self.env is not None:
+      try:
+        self.env.close()
+      except Exception:  # pylint: disable=broad-except
+        pass
+      self.env = None
 
   def reset(self):
     with self.lock:
+      if self.env is None:
+        return self.state(0)
       self._save_recording()
-      self.timestep = self.env.reset()
+      try:
+        self.timestep = self.env.reset()  # Lua runs here: errors surface now.
+      except Exception:  # pylint: disable=broad-except
+        self._fail()
+        return self.state(0)
       self.prefixes = recording._player_prefixes(self.timestep.observation)  # pylint: disable=protected-access
       self.scores = collections.defaultdict(float)
       self.steps = 0
       self.done = False
       self.rec = recording.EpisodeRecorder(
-          substrate=self.level, fps=self.fps, source='human',
+          substrate=self.level.split('.')[-1], fps=self.fps, source='human',
           record_player_views=self.player_views)
       self.rec.add_lab2d_timestep(self.timestep, active=-1,
                                   events=self._events())
@@ -268,22 +411,32 @@ class Game:
     except Exception:  # pylint: disable=broad-except
       return None
 
+  def _clamp(self, player):
+    return max(0, min(len(self.prefixes) - 1, int(player)))
+
   def step(self, keys, player):
     with self.lock:
-      if self.done:
+      if self.env is None or self.done:
         return self.state(player)
-      player = max(0, min(len(self.prefixes) - 1, int(player)))
+      player = self._clamp(player)
+      prefix = self.prefixes[player] if self.prefixes else ''
       KEYS.set(keys)
       try:
-        actions = self.reader.step(self.prefixes[player])
+        actions = self.reader.step(prefix)
       finally:
         KEYS.set(())
-      self.timestep = self.env.step(actions)
+      try:
+        self.timestep = self.env.step(actions)
+      except Exception:  # pylint: disable=broad-except  (e.g. a Lua error)
+        self._fail()
+        return self.state(player)
       self.steps += 1
       for p, r in level_playing_utils._get_rewards(self.timestep).items():  # pylint: disable=protected-access
         self.scores[p] += float(r)
-      self.rec.add_lab2d_timestep(self.timestep, actions, active=player,
-                                  events=self._events())
+      if self.rec is not None:
+        self.rec.add_lab2d_timestep(self.timestep, actions,
+                                    active=player if self.prefixes else -1,
+                                    events=self._events())
       if self.timestep.step_type == dm_env.StepType.LAST:
         self.done = True
         self._save_recording()
@@ -295,13 +448,23 @@ class Game:
       return self.state(player)
 
   def state(self, player):
+    base = dict(level=self.level, step=getattr(self, 'steps', 0),
+                done=getattr(self, 'done', False), error=self.error,
+                saving=self.saving, scores=[], player=None, world=None,
+                text='')
+    if self.timestep is None:
+      return base
     obs = self.timestep.observation
-    prefix = self.prefixes[max(0, min(len(self.prefixes) - 1, int(player)))]
-    view = obs.get(f'{prefix}.RGB', obs['WORLD.RGB'])
-    return dict(level=self.level, step=self.steps, done=self.done,
-                player=_png(view), world=_png(obs['WORLD.RGB']),
-                scores=[self.scores[p] for p in self.prefixes],
-                saving=self.saving)
+    world = obs.get('WORLD.RGB')
+    view = world
+    if self.prefixes:
+      view = obs.get(f'{self.prefixes[self._clamp(player)]}.RGB', world)
+    base.update(
+        player=_png(view) if view is not None else None,
+        world=_png(world) if world is not None else None,
+        scores=[self.scores[p] for p in self.prefixes],
+        text=_text(obs.get('WORLD.TEXT')))
+    return base
 
   # -- recording ------------------------------------------------------------
   def _save_recording(self):
@@ -336,18 +499,34 @@ class Game:
       return name
 
   def _close_env(self, save):
+    if save:
+      self._save_recording()
     if self.env is not None:
-      if save:
-        self._save_recording()
-      self.env.close()
+      try:
+        self.env.close()
+      except Exception:  # pylint: disable=broad-except
+        pass
       self.env = None
 
   def info(self):
-    play_mod, env_module = self.registry[self.level]
-    return dict(level=self.level, levels=list(self.registry), fps=self.fps,
-                players=len(self.prefixes),
-                controls=describe_controls(play_mod),
-                about=describe_substrate(env_module))
+    entry = self.registry[self.level]
+    custom = isinstance(entry, CustomConfig)
+    controls, about = [], ''
+    if self.error is None:
+      try:
+        controls = describe_controls(self.play_mod)
+        controls += [dict(action=a, label=_ACTION_LABELS.get(a, _humanize(a)),
+                          keys=[dict(keys='—',
+                                     effect='no key bound (always 0)')])
+                     for a in self.unbound]
+        about = describe_substrate(self.about_mod)
+      except Exception:  # pylint: disable=broad-except
+        traceback.print_exc()
+    return dict(level=self.level, levels=list(self.registry),
+                fps=getattr(self, 'fps', 8), players=len(self.prefixes),
+                controls=controls, about=about, error=self.error,
+                custom=custom,
+                source=str(entry.path) if custom else None)
 
 
 # --------------------------------------------------------------------------
@@ -394,8 +573,10 @@ class Handler(BaseHTTPRequestHandler):
       if method == 'GET' and url.path == '/info':
         return self._send(200, g.info())
       if method == 'POST' and url.path == '/load':
-        g.load(body['level'])
-        return self._send(200, g.info())
+        return self._send(200, g.load(body['level']))
+      if method == 'POST' and url.path == '/reload':
+        # Re-read config + Lua from disk; don't save the discarded episode.
+        return self._send(200, g.load(g.level, save=False))
       if method == 'POST' and url.path == '/reset':
         return self._send(200, g.reset())
       if method == 'POST' and url.path == '/step':
@@ -462,16 +643,36 @@ def main():
                   help='exit after this long with no browser activity')
   ap.add_argument('--login-host', default='klone.hyak.uw.edu')
   ap.add_argument('--list', action='store_true', help='list substrates')
+  ap.add_argument('--tutorial', action='store_true',
+                  help='load the substrate tutorial (examples/tutorial/'
+                       'harvest): harvest.py, plus harvest_finished.py')
+  ap.add_argument('--config', action='append', default=[],
+                  help='a game config module with get_config(): dotted path\n'
+                       'relative to meltingpot/ (e.g. examples.tutorial.\n'
+                       'harvest.configs.environment.harvest) or a .py path.\n'
+                       'Re-read from disk on Reload. Repeatable.')
+  ap.add_argument('--play-module',
+                  help='module whose _ACTION_MAP gives the controls for\n'
+                       '--config games (default: WASD move, Q/E turn)')
   args = ap.parse_args()
 
-  registry = discover()
+  registry = {}
+  for spec in (TUTORIAL_CONFIGS if args.tutorial else ()) + tuple(args.config):
+    registry[spec] = CustomConfig(spec, args.play_module)
+  first = next(iter(registry), None)
+  registry.update(discover())
   if args.list:
     print('\n'.join(registry))
     return
+  level = first if first and args.substrate == ap.get_default('substrate') \
+      else args.substrate
   os.makedirs(args.record_dir, exist_ok=True)
   game = Game(registry, os.path.abspath(args.record_dir),
               player_views=not args.no_player_views)
-  game.load(args.substrate)
+  game.load(level)
+  if game.error:
+    print('[mp-play] (the page will show this error; fix the file and click'
+          ' Reload)', flush=True)
 
   host, ip = _cluster_ip()
   Handler.game = game
@@ -484,7 +685,7 @@ def main():
   url = f'http://localhost:{lp}/?token={Handler.token}'
   print(f"""
 ==========================================================================
- Melting Pot play server: {args.substrate}  (on {host}:{port})
+ Melting Pot play server: {level}  (on {host}:{port})
 
  1) On YOUR computer (Mac/Linux terminal, or Windows PowerShell), run:
 
@@ -577,6 +778,13 @@ summary h2{display:inline}
 summary::before{content:"\u25b8 ";color:var(--muted)}
 details[open] summary::before{content:"\u25be "}
 #about{font-size:13px;white-space:pre-line;color:var(--fg)}
+.err{background:#fde8e8;color:#8a1111;border:1px solid #f3b4b4;
+border-radius:6px;padding:8px;margin:0 0 10px;max-height:320px;overflow:auto;
+font-size:12px}
+@media (prefers-color-scheme:dark){.err{background:#3a1616;color:#ffb3b3;
+border-color:#6b2a2a}}
+.wtext{color:var(--fg);background:var(--chip);border-radius:6px;padding:6px}
+code{font:12px ui-monospace,Menlo,monospace}
 pre{white-space:pre-wrap;font:12px/1.4 ui-monospace,Menlo,monospace;
 color:var(--muted);margin:0}
 h2{font-size:13px;color:var(--muted);margin:14px 0 6px;font-weight:500;
@@ -588,6 +796,7 @@ a{color:var(--accent)}
 <header>
  <h1>Melting Pot</h1>
  <select id="level" title="Substrate"></select>
+ <button id="reload" title="Re-read the config and Lua files from disk and restart the episode">&#8635; Reload files</button>
  <span class="muted">playing as</span>
  <select id="player" title="Tab cycles players"></select>
  <label class="muted"><input type="checkbox" id="turn"> turn-based</label>
@@ -595,12 +804,16 @@ a{color:var(--accent)}
 </header>
 <main>
  <section class="card">
+  <div id="source" class="muted" style="margin-bottom:8px" hidden></div>
+  <pre id="error" class="err" hidden></pre>
   <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">
-   <div><div class="muted" style="margin-bottom:4px">Your view</div>
+   <div id="pvbox"><div class="muted" style="margin-bottom:4px">Your view</div>
     <canvas id="pv"></canvas></div>
    <div><div class="muted" style="margin-bottom:4px">World</div>
     <canvas id="wv"></canvas></div>
   </div>
+  <div id="wtextbox" hidden><div class="muted" style="margin:8px 0 4px">
+   WORLD.TEXT</div><pre id="wtext" class="wtext"></pre></div>
   <div class="row">
    <button id="pause" class="primary">Pause</button>
    <button id="reset">New episode</button>
@@ -668,9 +881,12 @@ function paint(canvas, b64, maxW, maxH) {
 }
 function render(s) {
   const H = Math.max(240, window.innerHeight - 220);
-  paint(pv, s.player, 560, H);
-  paint(wv, s.world, Math.max(240, window.innerWidth - 1000), H);
-  done = s.done;
+  if (s.player) paint(pv, s.player, 560, H);
+  if (s.world) paint(wv, s.world, Math.max(240, window.innerWidth - 1000), H);
+  showError(s.error);
+  $('wtextbox').hidden = !s.text;
+  $('wtext').textContent = s.text || '';
+  done = s.done || !!s.error;
   $('status').textContent = 'step ' + s.step + (s.done ? ' · episode over'
       : paused ? ' · paused' : '');
   $('scores').innerHTML = s.scores.map((v, i) =>
@@ -686,6 +902,11 @@ function render(s) {
       : 'Replay ' + st + '…';
   }
 }
+function showError(err) {
+  $('error').hidden = !err;
+  $('error').textContent = err ? 'Could not load this game. Fix the file, ' +
+      'then click Reload files.\n\n' + err : '';
+}
 let viewSeq = 0;
 async function showView() {
   // Every player's view is in the current timestep, so no step is needed.
@@ -695,6 +916,7 @@ async function showView() {
   catch (e) { $('status').textContent = 'error: ' + e.message; }
 }
 function switchPlayer(p) {
+  if (!info || !info.players) return;
   player = p; $('player').value = p; showView();
 }
 async function step() {
@@ -719,7 +941,7 @@ function schedule() {
 function setPlayers(n) {
   $('player').innerHTML = Array.from({length: n}, (_, i) =>
       '<option value="' + i + '">Player ' + (i + 1) + '</option>').join('');
-  $('player').value = player = Math.min(player, n - 1);
+  $('player').value = player = Math.max(0, Math.min(player, n - 1));
 }
 async function loadInfo(i) {
   info = i;
@@ -734,14 +956,24 @@ async function loadInfo(i) {
                  (k.effect ? ' <span class="muted">' + esc(k.effect) +
                   '</span>' : '')).join('<br>') + '</td></tr>').join('');
   $('about').textContent = i.about || '(no description)';
+  $('source').hidden = !i.source;
+  $('source').innerHTML = i.source ? 'Loaded from <code>' + esc(i.source) +
+      '</code> &middot; edit it (and its Lua level), then click ' +
+      '<b>Reload files</b>.' : '';
+  $('reload').hidden = !i.custom;
+  $('pvbox').hidden = !i.players;
   setPlayers(i.players);
-  render(await api('/reset', {}));
+  showError(i.error);
+  if (!i.error) render(await api('/reset', {}));
+  else { done = true; $('status').textContent = 'load error'; }
   schedule();
 }
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'SELECT') return;
   if (e.code === 'Tab') {
-    e.preventDefault(); switchPlayer((player + 1) % info.players); return;
+    e.preventDefault();
+    if (info && info.players) switchPlayer((player + 1) % info.players);
+    return;
   }
   const k = keyName(e); if (!k) return;
   e.preventDefault();
@@ -767,6 +999,13 @@ $('level').onchange = async e => {
   $('status').textContent = 'loading ' + e.target.value + '…';
   clearInterval(timer);
   await loadInfo(await api('/load', {level: e.target.value}));
+  document.body.focus();
+};
+$('reload').onclick = async () => {
+  $('status').textContent = 'reloading…';
+  clearInterval(timer);
+  try { await loadInfo(await api('/reload', {})); }
+  catch (e) { $('status').textContent = 'error: ' + e.message; }
   document.body.focus();
 };
 $('replays').href = '/replays/?token=' + encodeURIComponent(TOKEN);

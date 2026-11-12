@@ -3,7 +3,7 @@
 | Path | What it is |
 |---|---|
 | `apptainer/meltingpot.def`, `build.sbatch` | Container with Melting Pot + deps (`sbatch agents/apptainer/build.sbatch`) |
-| `bin/mp-play` | Play any substrate as a human, in your browser |
+| `bin/mp-play` | Play any substrate as a human, in your browser (`--tutorial` for the substrate tutorial) |
 | `bin/mp-replay` | Turn recorded episodes into standalone HTML replays |
 | `mpviz/` | Python package behind both (`recording`, `replay_html`, `play_server`) |
 | `experiments/` | Experiments (e.g. `random_zap_ablation.py`, `run.sbatch`) |
@@ -170,6 +170,58 @@ Size guide (measured, Commons Harvest, 7 players, 1,000 steps): about 6 MB
 `.npz` and 11 MB `.html` with player views. Use `--stride` for longer runs.
 
 ---
+
+## 3. Work through the substrate tutorial
+
+`meltingpot/docs/substrate_tutorial/index.md` builds a game step by step by
+editing files and looking at the result. `mp-play` can load those files
+straight from the `meltingpot/` checkout and re-read them on demand:
+
+```bash
+agents/bin/mp-play --tutorial
+```
+
+This opens the tutorial's game
+(`examples/tutorial/harvest/configs/environment/harvest.py`) first, with the
+finished version (`harvest_finished.py`) next in the substrate dropdown for
+comparison. Then repeat:
+
+1. Edit the files the tutorial mentions. The compute node sees saved changes
+   immediately. Use VS Code Remote-SSH or an editor on klone.
+   - `meltingpot/examples/tutorial/harvest/configs/environment/harvest.py`
+   - `meltingpot/examples/tutorial/harvest/levels/harvest/init.lua`, and the
+     `components.lua` you create next to it
+2. Click **Reload files** on the page. It re-reads the Python config and the
+   Lua level from disk and starts a fresh episode in about a second, with no
+   job restart. The discarded episode is not saved.
+3. If something is wrong (a Python exception, a Lua error such as
+   `The component DensityRegrow does not exist in the registry`), the page
+   shows the full error in red and the server keeps running. Fix the file and
+   click **Reload files** again.
+
+The tutorial's command-line options map to the page as follows:
+- `--observation WORLD.RGB` vs. the default first-person view: the page
+  always shows both side by side. With 0 players (the tutorial's first steps)
+  it shows the world view only.
+- `--display_text`: if the game has a `WORLD.TEXT` observation, the page
+  shows it under the world view.
+- `--verbose`: use a replay instead. Each step's actions, rewards and events
+  are listed there.
+- Controls are the tutorial's (WASD move, Q/E turn). An action your config
+  adds without a key, e.g. a new beam, is listed as "no key bound" and always
+  sends 0.
+
+For your own game, `--config` takes any module with `get_config()`, as a
+dotted path relative to `meltingpot/` or a `.py` file path. `--play-module`
+takes a module whose `_ACTION_MAP` binds keys to its actions:
+
+```bash
+agents/bin/mp-play --config path/to/my_game.py --play-module path/to/play_my_game.py
+```
+
+> Tip: the tutorial edits files inside the `meltingpot/` submodule (your
+> fork). Work on a branch there, e.g. `git -C meltingpot switch -c tutorial`,
+> to keep its `main` clean.
 
 ## Troubleshooting
 

@@ -88,7 +88,7 @@ class EpisodeRecorder:
     # once the action width is known.
     self._actions.append(None if actions is None else np.asarray(
         actions, dtype=np.int32).reshape(len(rewards), -1))
-    if self.record_player_views and players is not None:
+    if self.record_player_views and players:
       self._players.append(np.stack(players).astype(np.uint8))
     self._active.append(active)
     self._events.append(_jsonable(events) if events else [])

@@ -124,6 +124,54 @@ for level in registry:
   except Exception as e:  # pylint: disable=broad-except
     check(False, f'substrate {level}: {type(e).__name__}: {e}')
 
+# --- 2b. substrate tutorial: custom configs, reload, errors ---------------
+tut = {spec: ps.CustomConfig(spec) for spec in ps.TUTORIAL_CONFIGS}
+g = ps.Game(dict(tut, **registry), tmp, player_views=True)
+inf = g.load(ps.TUTORIAL_CONFIGS[0])  # the tutorial's starting (empty) game
+st = g.step(['w'], 0)
+check(inf['error'] is None and inf['players'] == 0 and st['world'] and
+      st['step'] == 1,
+      f"tutorial start (empty game) loads: players={inf['players']} "
+      f"error={(inf['error'] or '')[-200:]!r}")
+inf = g.load(ps.TUTORIAL_CONFIGS[1])  # harvest_finished
+w0 = g.state(0)['player']
+moved = False
+for key in ['w', 'd', 's', 'a'] * 3:  # random spawn may face a wall
+  st = g.step([key], 0)
+  moved = moved or st['player'] != w0
+check(inf['error'] is None and inf['players'] == 5 and
+      [c['action'] for c in inf['controls']] == ['move', 'turn'] and moved,
+      f"tutorial harvest_finished plays: players={inf['players']}, "
+      f"controls={[c['action'] for c in inf['controls']]}")
+g._close_env(save=False)
+
+# Edit -> Reload loop on a scratch copy of the finished config.
+src = (ps.MP_SOURCE / 'examples/tutorial/harvest/configs/environment/'
+       'harvest_finished.py').read_text()
+cfg = os.path.join(tmp, 'my_harvest.py')
+broken = re.sub(r'("levelName":\s*)"harvest_finished"', r'\g<1>"no_such_level"',
+                src)
+check(broken != src, 'scratch config can be broken for the error test')
+with open(cfg, 'w') as f:
+  f.write(broken)
+g = ps.Game({cfg: ps.CustomConfig(cfg)}, tmp)
+inf = g.load(cfg)
+st = g.step(['w'], 0)
+check(inf['error'] is not None and st['error'] is not None and
+      st['player'] is None,
+      'broken config reports an error instead of crashing')
+with open(cfg, 'w') as f:
+  edited = re.sub(r'("maxEpisodeLengthFrames":\s*)1000', r'\g<1>3', src)
+  check(edited != src, 'scratch config edit applied')
+  f.write(edited)
+inf = g.load(cfg, save=False)  # what the Reload button does
+for _ in range(3):
+  st = g.step([], 0)
+check(inf['error'] is None and st['done'],
+      f"after fixing the file, Reload picks up the edit (3-step episode "
+      f"done={st['done']}, step={st['step']})")
+g._close_env(save=False)
+
 # --- 3. experiment recording -> HTML replay --------------------------------
 from meltingpot import substrate
 env = substrate.build('commons_harvest__open',
