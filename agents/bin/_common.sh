@@ -60,12 +60,27 @@ mp_time_label() {
   else printf '%s' "$t"; fi
 }
 
+# Which Melting Pot Python code runs:
+#   default            your meltingpot/ checkout (git submodule), so edits to
+#                      any Melting Pot module (e.g. utils/substrates/specs.py)
+#                      take effect immediately, no image rebuild.
+#   MP_USE_INSTALLED=1 the copy installed in the image at build time. Needed
+#                      for Melting Pot's pretrained bots / scenarios: their
+#                      saved models (meltingpot/assets, downloaded at build
+#                      time) only exist there.
+if [[ "${MP_USE_INSTALLED:-0}" == 1 ]]; then
+  MP_PYTHONPATH="$MP_REPO/agents"
+else
+  MP_PYTHONPATH="$MP_REPO/meltingpot:$MP_REPO/agents"
+fi
+
 # Run python inside the container with the repo bound and agents/ importable.
 # (MP_EXEC=exec replaces the shell, so signals reach Python directly.)
+# PYTHONDONTWRITEBYTECODE keeps __pycache__ dirs out of the meltingpot/ tree.
 mp_python() {
   ${MP_EXEC:-} apptainer exec --cleanenv \
     --bind "$MP_REPO" --pwd "$MP_REPO" \
-    --env "PYTHONPATH=$MP_REPO/agents,USER=$USER" \
+    --env "PYTHONPATH=$MP_PYTHONPATH,USER=$USER,PYTHONDONTWRITEBYTECODE=1" \
     --env "OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}" \
     "$MP_SIF" python "$@"
 }

@@ -229,6 +229,102 @@ check(inf['error'] is None and inf['players'] == 7 and st['step'] == 1,
       f"players={inf['players']} error={(inf['error'] or '')[-200:]!r}")
 g._close_env(save=False)
 
+# --- 2d. comms support: auto-bound on/off actions, observations panel,
+#          observations in recordings and replays --------------------------
+talk_cfg = os.path.join(tmp, 'talk_harvest.py')
+with open(talk_cfg, 'w') as f:
+  f.write("""from mpviz import source
+base = source.load_module(source.MP_SOURCE / 'examples/tutorial/harvest/'
+                          'configs/environment/harvest_finished.py', 'hf')
+def get_config():
+  c = base.get_config()
+  for comp in c.lab2d_settings['simulation']['prefabs']['avatar']['components']:
+    if comp['component'] == 'Avatar':
+      comp['kwargs']['actionOrder'] = ['move', 'turn', 'talk']
+      comp['kwargs']['actionSpec'] = {
+          'move': {'default': 0, 'min': 0, 'max': 4},
+          'turn': {'default': 0, 'min': -1, 'max': 1},
+          'talk': {'default': 0, 'min': 0, 'max': 1}}
+  return c
+""")
+g = ps.Game({talk_cfg: ps.CustomConfig(talk_cfg)}, tmp)
+inf = g.load(talk_cfg)
+ctl = {c['action']: c['keys'][0]['keys'] for c in inf['controls']}
+check(inf['error'] is None and ctl.get('talk') == 'Space',
+      f"extra on/off action auto-bound to Space: {ctl} "
+      f"error={(inf['error'] or '')[-200:]!r}")
+g.step(['SPACE'], 0)
+names = g.rec.action_names
+acts = g.rec._actions[-1]
+check(acts[0, names.index('talk')] == 1 and not acts[1:, names.index('talk')].any(),
+      f'holding Space sends talk=1 for the active player only ({names})')
+g._close_env(save=False)
+
+g = ps.Game(registry, tmp)
+g.load('clean_up')
+st = g.step(['1'], 0)
+obs0 = st['observations'][0] if st['observations'] else {}
+check(len(st['observations']) == 7 and 'READY_TO_SHOOT' in obs0,
+      f"observations panel data per player: {sorted(obs0)}")
+for _ in range(3):
+  g.step([], 0)
+name = g.save_now()
+for _ in range(120):
+  if g.saving.get(name) != 'saving':
+    break
+  time.sleep(1)
+npz = os.path.join(tmp, name[:-5] + '.npz')
+d = np.load(npz)
+check('obs__READY_TO_SHOOT' in d and d['obs__READY_TO_SHOOT'].shape[:2] == (5, 7),
+      f"recording stores per-player observations: "
+      f"{[k for k in d if k.startswith('obs__')]}")
+page = open(os.path.join(tmp, name)).read()
+check('"obs":{' in page and '"READY_TO_SHOOT":[[' in page,
+      'replay HTML includes the observations table data')
+g._close_env(save=False)
+
+# --- 2e. Reload re-reads modules the config imports (e.g. a base config) --
+# Same shape as configs/substrates/communication/: a regular package
+# (cfgroot, with __init__.py) holding a namespace folder (comm, without one).
+import sys as _sys
+comm = os.path.join(tmp, 'cfgroot', 'comm')
+os.makedirs(comm, exist_ok=True)
+open(os.path.join(tmp, 'cfgroot', '__init__.py'), 'w').close()
+hf = str(ps.MP_SOURCE / 'examples/tutorial/harvest/configs/environment/'
+         'harvest_finished.py')
+def write_base(limit):
+  with open(os.path.join(comm, 'base.py'), 'w') as f:
+    f.write(f"""from mpviz import source
+hf = source.load_module({hf!r}, 'hf_base')
+def get_config():
+  c = hf.get_config()
+  c.lab2d_settings['maxEpisodeLengthFrames'] = {limit}
+  return c
+""")
+write_base(1000)
+child = os.path.join(comm, 'child.py')
+with open(child, 'w') as f:
+  f.write('from cfgroot.comm import base\ndef get_config():\n'
+          '  return base.get_config()\n')
+_sys.path.insert(0, tmp)
+g = ps.Game({child: ps.CustomConfig(child)}, tmp)
+inf = g.load(child)
+check(inf['error'] is None, f"config importing from a namespace folder loads: "
+      f"{(inf['error'] or '')[-200:]!r}")
+for _ in range(2):  # reload twice: the second reload is where imports broke
+  inf = g.load(child, save=False)
+check(inf['error'] is None, f"...and still loads after repeated reloads: "
+      f"{(inf['error'] or '')[-200:]!r}")
+write_base(2)          # edit the *imported* module, then Reload
+inf = g.load(child, save=False)
+g.step([], 0)
+st = g.step([], 0)
+check(inf['error'] is None and st['done'] and st['step'] == 2,
+      f"Reload re-reads a module the config imports (episode ended at step "
+      f"{st['step']}, done={st['done']}, error={(inf['error'] or '')[-120:]!r})")
+g._close_env(save=False)
+_sys.path.remove(tmp)
+
 # --- 3. experiment recording -> HTML replay --------------------------------
 from meltingpot import substrate
 env = substrate.build('commons_harvest__open',

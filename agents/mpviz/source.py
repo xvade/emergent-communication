@@ -13,6 +13,7 @@ not part of it, so anything that loads them goes through here:
 
 import contextlib
 import pathlib
+import sys
 import types
 
 from meltingpot.utils.substrates import builder
@@ -26,6 +27,38 @@ def to_path(spec):
   if spec.endswith('.py') or '/' in spec:
     return pathlib.Path(spec).resolve()
   return MP_SOURCE / (spec.replace('.', '/') + '.py')
+
+
+def forget_config_modules(*extra_dirs):
+  """Drops cached imports of config modules so the next import re-reads them.
+
+  A config file is executed fresh on every load, but modules *it* imports
+  (e.g. `from meltingpot.configs.substrates.communication import toy`) live in
+  Python's import cache, so edits to them would be ignored until a restart.
+  This forgets every cached module whose file is under the checkout's
+  meltingpot/configs/ or under any of `extra_dirs`.
+
+  Only plain modules are forgotten, never packages (`__init__.py`, or
+  namespace folders without one): packages hold the import machinery's state
+  for their children, and dropping e.g. `meltingpot.configs.substrates` breaks
+  imports from namespace subfolders like `.../substrates/communication/`.
+  The forgotten module is also detached from its parent package, otherwise
+  `from package import module` would keep returning the old one.
+  """
+  roots = [MP_SOURCE / 'meltingpot' / 'configs'] + [
+      pathlib.Path(d).resolve() for d in extra_dirs]
+  for name, mod in list(sys.modules.items()):
+    f = getattr(mod, '__file__', None)
+    if not f or hasattr(mod, '__path__'):  # namespace package / package
+      continue
+    f = pathlib.Path(f).resolve()
+    if not any(f.is_relative_to(r) for r in roots):
+      continue
+    del sys.modules[name]
+    parent_name, _, child = name.rpartition('.')
+    parent = sys.modules.get(parent_name)
+    if parent is not None and getattr(parent, child, None) is mod:
+      delattr(parent, child)
 
 
 def load_module(path, name=None):

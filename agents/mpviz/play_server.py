@@ -119,7 +119,23 @@ _ACTION_LABELS = {
     'fireClean': 'Fire cleaning beam', 'fireClaim': 'Fire claiming beam',
     'fire_1': 'Planting beam 1', 'fire_2': 'Planting beam 2',
     'fire_3': 'Planting beam 3',
+    'binaryComms': 'Communicate (binary signal)',
 }
+
+# Keys auto-assigned, in order, to on/off (0..1) actions that a --config game
+# has no binding for (only when it has no --play-module of its own). These
+# are Melting Pot's own key helpers, so the Controls panel describes them.
+_AUTO_KEYS = (
+    level_playing_utils.get_space_key_pressed,
+    level_playing_utils.get_key_number_one_pressed,
+    level_playing_utils.get_key_number_two_pressed,
+    level_playing_utils.get_key_number_three_pressed,
+    level_playing_utils.get_key_number_four_pressed,
+    level_playing_utils.get_key_number_five_pressed,
+    level_playing_utils.get_key_z_pressed,
+    level_playing_utils.get_key_x_pressed,
+    level_playing_utils.get_key_c_pressed,
+)
 
 # Named meanings of signed action values, where Melting Pot's configs name
 # them (e.g. fruit_market.py: SHOVE = shove 1, PULL = shove -1).
@@ -250,6 +266,9 @@ class CustomConfig:
     """
     if not self.path.is_file():
       raise FileNotFoundError(f'config file not found: {self.path}')
+    # Re-read modules the config imports (e.g. a base config), not just the
+    # config file itself.
+    source.forget_config_modules(self.path.parent)
     mod = self._exec(self.path, f'mpviz_custom_{self.path.stem}')
     config = mod.get_config()
     if 'lab2d_settings' not in config:
@@ -361,8 +380,22 @@ class Game:
         self.fps = int(getattr(self.play_mod, 'FRAMES_PER_SECOND', 8))
         # Actions the game has but no key is bound to always send 0.
         action_map = dict(self.play_mod._ACTION_MAP)  # pylint: disable=protected-access
-        names = {k.split('.', 1)[1] for k in self.env.action_spec()}
-        self.unbound = sorted(names - set(action_map))
+        spec = {k.split('.', 1)[1]: v for k, v in self.env.action_spec().items()}
+        unbound = sorted(set(spec) - set(action_map))
+        if getattr(self.play_mod, '__name__', '') == 'default_controls':
+          # Give the config's extra on/off actions free keys (Space, 1, 2...).
+          free = [f for f in _AUTO_KEYS if f not in action_map.values()]
+          for name in list(unbound):
+            s = spec[name]
+            if (getattr(s, 'minimum', None), getattr(s, 'maximum', None)) \
+                == (0, 1) and free:
+              action_map[name] = free.pop(0)
+              unbound.remove(name)
+        self.unbound = unbound
+        # What the Controls panel shows: the bindings actually in use.
+        self.controls_mod = types.SimpleNamespace(
+            __name__=getattr(self.play_mod, '__name__', 'controls'),
+            _ACTION_MAP=dict(action_map))
         for name in self.unbound:
           action_map[name] = lambda: 0
         self.reader = level_playing_utils.ActionReader(self.env, action_map)
@@ -465,7 +498,7 @@ class Game:
                 done=getattr(self, 'done', False), error=self.error,
                 end_reason=getattr(self, 'end_reason', None),
                 saving=self.saving, scores=[], player=None, world=None,
-                text='')
+                text='', observations=[])
     if self.timestep is None:
       return base
     obs = self.timestep.observation
@@ -477,7 +510,12 @@ class Game:
         player=_png(view) if view is not None else None,
         world=_png(world) if world is not None else None,
         scores=[self.scores[p] for p in self.prefixes],
-        text=_text(obs.get('WORLD.TEXT')))
+        text=_text(obs.get('WORLD.TEXT')),
+        # Each player's small observations (e.g. BINARY_COMMS): what the
+        # game tells each agent besides pixels, including received comms.
+        observations=[{k: np.asarray(v).tolist() for k, v in o.items()}
+                      for o in recording.lab2d_player_observations(
+                          obs, self.prefixes)])
     return base
 
   # -- recording ------------------------------------------------------------
@@ -530,7 +568,7 @@ class Game:
     controls, about = [], ''
     if self.error is None:
       try:
-        controls = describe_controls(self.play_mod)
+        controls = describe_controls(self.controls_mod)
         controls += [dict(action=a, label=_ACTION_LABELS.get(a, _humanize(a)),
                           keys=[dict(keys='—',
                                      effect='no key bound (always 0)')])
@@ -785,6 +823,8 @@ td.r{text-align:right} tr.me td{font-weight:600}
 .how{margin:0;padding-left:18px;font-size:13px}
 .how li{margin:2px 0}
 table.ctl td{vertical-align:top}
+table.obs td{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+table.obs td.on{background:var(--accent);color:#fff;border-radius:3px}
 table.ctl td.k{white-space:nowrap;font-weight:600}
 kbd{font:12px ui-monospace,Menlo,monospace;background:var(--chip);
 border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;
@@ -852,6 +892,12 @@ a{color:var(--accent)}
  <aside class="card">
   <h2 style="margin-top:0">Scores</h2>
   <table><tbody id="scores"></tbody></table>
+  <div id="obsbox" hidden>
+   <h2>Observations <span class="muted" style="text-transform:none;
+    letter-spacing:0">(what each player receives, besides pixels)</span></h2>
+   <table class="obs"><thead id="obs-head"></thead>
+    <tbody id="obs-body"></tbody></table>
+  </div>
   <h2>How to play</h2>
   <ol class="how">
    <li>Click the game once so it receives your key presses.</li>
@@ -929,6 +975,7 @@ function render(s) {
       '<tr class="' + (i === player ? 'me' : '') + '"><td>Player ' + (i + 1) +
       (i === player ? ' (you)' : '') + '</td><td class="r">' +
       (+v.toFixed(2)) + '</td></tr>').join('');
+  renderObservations(s.observations || []);
   const names = Object.keys(s.saving || {});
   if (names.length) {
     const last = names[names.length - 1], st = s.saving[last];
@@ -950,6 +997,26 @@ function showError(err) {
       (info && info.custom ? 'Fix the file, then click Reload files.'
                            : 'Click Rebuild to start it again.') +
       ' The server is still running.\n\n' + err : '';
+}
+function fmtObs(v) {
+  if (Array.isArray(v)) return v.length === 1 ? fmtObs(v[0])
+      : '[' + v.map(fmtObs).join(', ') + ']';
+  return typeof v === 'number' ? String(+v.toFixed(3)) : String(v);
+}
+function renderObservations(obs) {
+  const names = [...new Set(obs.flatMap(o => Object.keys(o)))].sort();
+  $('obsbox').hidden = !names.length;
+  if (!names.length) return;
+  $('obs-head').innerHTML = '<tr><th>Player</th>' +
+      names.map(n => '<th>' + n + '</th>').join('') + '</tr>';
+  $('obs-body').innerHTML = obs.map((o, i) =>
+      '<tr class="' + (i === player ? 'me' : '') + '"><td>P' + (i + 1) +
+      (i === player ? ' (you)' : '') + '</td>' + names.map(n => {
+        const v = o[n], txt = v === undefined ? '' : fmtObs(v);
+        // Highlight non-zero values (e.g. a received signal) so they pop.
+        const on = v !== undefined && [].concat(v).flat(9).some(x => x);
+        return '<td class="' + (on ? 'on' : '') + '">' + txt + '</td>';
+      }).join('') + '</tr>').join('');
 }
 let viewSeq = 0;
 async function showView() {

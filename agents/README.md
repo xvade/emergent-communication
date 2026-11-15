@@ -31,6 +31,16 @@ login node.
 > uses idle nodes cluster-wide. Jobs there can be preempted, which is fine
 > for short play or replay sessions.
 
+> **Which Melting Pot code runs:** the launchers and job scripts import
+> Melting Pot from your `meltingpot/` checkout, the git submodule, not the
+> copy installed in the image. Edits to any Melting Pot module, e.g.
+> `meltingpot/meltingpot/utils/substrates/specs.py`, and to Lua levels take
+> effect immediately, without an image rebuild. A syntax error in the
+> checkout therefore breaks every launcher until it's fixed. Melting Pot's
+> pretrained bots (scenarios) need the saved models that only the installed
+> copy has. For those, run with `MP_USE_INSTALLED=1`, e.g.
+> `MP_USE_INSTALLED=1 agents/bin/mp-play ...`.
+
 > **Storage:** this repo lives on `/gscratch/scrubbed`, which **deletes files
 > not used for ~21 days**. Recordings and replays you want to keep should be
 > copied to your lab's `/gscratch/<group>/` or your laptop.
@@ -65,6 +75,12 @@ focus.
   "delete" key acts as Delete.
 - **Tab** (or the dropdown) switches which player you control. Other players
   take no-op actions.
+- The **Observations** panel shows each player's small numeric
+  observations at every step, e.g. a communication signal
+  (`BINARY_COMMS`), `READY_TO_SHOOT` or an inventory. It's what each agent
+  receives besides pixels, so you can see what was sent and what each
+  player got. Non-zero values are highlighted. Replays save these
+  observations and show them as extra columns in the per-step table.
 - **Real-time** by default at the substrate's fps (usually 8 steps/s).
   Tick **turn-based** to advance one step per key press — easier for careful
   exploration. **Pause** stops the clock.
@@ -213,6 +229,11 @@ The tutorial's command-line options map to the page as follows:
 - Controls are the tutorial's (WASD move, Q/E turn). An action your config
   adds without a key, e.g. a new beam, is listed as "no key bound" and always
   sends 0.
+
+If a `--config` game has extra on/off actions (range 0–1, e.g. a
+`binaryComms` signal) and no `--play-module`, they get free keys
+automatically: the first gets **Space**, the next ones **1**, **2**, **3**…,
+listed in the Controls panel.
 
 For your own game, `--config` takes any module with `get_config()`, as a
 dotted path relative to `meltingpot/` or a `.py` file path. `--play-module`

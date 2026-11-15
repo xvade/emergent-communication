@@ -9,7 +9,7 @@
 # Submit from the repo root:  sbatch agents/experiments/run.sbatch
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}"
-apptainer run --cleanenv --bind "$PWD" agents/apptainer/meltingpot.sif \
-  agents/experiments/random_zap_ablation.py \
+source agents/bin/_common.sh   # container + Melting Pot from your checkout
+mp_python agents/experiments/random_zap_ablation.py \
   --substrate commons_harvest__open --episodes 3 --steps 1000 \
   --out agents/experiments/results "$@"

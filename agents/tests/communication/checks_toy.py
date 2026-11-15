@@ -205,9 +205,11 @@ class Game:
              if self.level.grid[xy] == ' ' and xy not in occupied]
     return not np.array_equal(tile(self.level.apple), tile(empty[0]))
 
-  def step(self, moves):
-    """moves: {player: absolute direction 0..3 or None (stand still)}."""
+  def step(self, moves, extra=None):
+    """moves: {player: absolute direction 0..3 or None (stand still)};
+    extra: {'<player>.<action>': value} for any other actions."""
     action = {k: 0 for k in self.env.action_spec()}
+    action.update(extra or {})
     for p, d in moves.items():
       if d is not None:
         rel = (d - self.facing(p)) % 4  # egocentric: fwd, right, back, left
@@ -327,6 +329,26 @@ def _dynamic_checks(r, config, level, game):
   r.check(not missing and not problems, 'all 4 (apple, pad) cases covered',
           '; '.join(problems) or (f'not seen in {MAX_PAD_EPISODES} episodes: '
                                   f'{sorted(missing)}' if missing else ''))
+
+  # Binary communication, if the config has it: a player's binaryComms
+  # action should show up in every player's BINARY_COMMS observation.
+  spec = game.env.action_spec()
+  if all(f'{p}.binaryComms' in spec for p in game.players):
+    def comms():
+      return [np.asarray(game.ts.observation.get(f'{p}.BINARY_COMMS', -1))
+              .ravel().tolist() for p in game.players]
+    for sender in game.players:
+      game.reset()
+      game.step({}, {f'{sender}.binaryComms': 1})
+      heard = comms()
+      game.step({})
+      quiet = comms()
+      r.check(all(v == [1] for v in heard) and all(v == [0] for v in quiet),
+              f'player {sender} sends binaryComms=1: every player receives '
+              'BINARY_COMMS=1, then 0 when nobody sends',
+              f'after sending: {heard}, next step: {quiet}')
+  else:
+    r.skip('binary communication', 'no binaryComms action')
 
   # Time limit: nobody moves -> ends at maxEpisodeLengthFrames, no reward.
   game.reset()

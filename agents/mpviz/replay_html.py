@@ -71,6 +71,9 @@ def build_html(data: dict, meta: dict, *, stride: int = 1,
               if len(meta.get('events', [])) == len(data['world']) else None),
       colors=['#%02x%02x%02x' % PLAYER_COLORS[p % len(PLAYER_COLORS)]
               for p in range(n)],
+      # Small per-player observations (e.g. BINARY_COMMS): name -> (T, N, ...)
+      obs={k[len('obs__'):]: np.round(data[k][idx].astype(float), 4).tolist()
+           for k in sorted(data) if k.startswith('obs__')},
       scale=scale,
   )
   blob = json.dumps(payload, separators=(',', ':')).replace('</', '<\\/')
@@ -143,6 +146,8 @@ td,th{padding:3px 6px;border-bottom:1px solid var(--line);text-align:left;
 font-size:13px}
 th{color:var(--muted);font-weight:500}
 td.r{text-align:right}
+td.obs{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+td.obs.on{background:var(--accent);color:#fff}
 tr.act td{font-weight:600}
 .pos{color:#2b9348}.neg{color:#d00000}
 @media (prefers-color-scheme:dark){.pos{color:#6fd08c}.neg{color:#ff7b7b}}
@@ -183,7 +188,8 @@ overflow:auto;white-space:pre-wrap;color:var(--muted)}
 <aside class="card">
  <h2 style="margin-top:0">This step</h2>
  <table><thead><tr><th>Player</th><th>Action</th><th class="r">Reward</th>
- <th class="r">Total</th></tr></thead><tbody id="tbl"></tbody></table>
+ <th class="r">Total</th><th id="obs-th" hidden></th></tr></thead>
+ <tbody id="tbl"></tbody></table>
  <h2>Events</h2><div id="events">&mdash;</div>
 </aside>
 </main>
@@ -247,13 +253,32 @@ function draw() {
       (p + 1) + (p === act ? ' (you)' : '') + '</td><td>' + aTxt +
       '</td><td class="r ' + (r > 0 ? 'pos' : r < 0 ? 'neg' : '') + '">' +
       (r ? (+r.toFixed(3)) : '') + '</td><td class="r">' +
-      (+D.cum[cur][p].toFixed(3)) + '</td></tr>';
+      (+D.cum[cur][p].toFixed(3)) + '</td>' + obsCells(p) + '</tr>';
   }
   $('tbl').innerHTML = rows;
   const ev = D.events ? D.events[cur] : null;
   $('events').textContent = ev && ev.length
       ? ev.map(e => JSON.stringify(e)).join('\n') : '—';
   drawChart();
+}
+// Observations each player received this step (e.g. BINARY_COMMS); non-zero
+// values are highlighted so signals stand out.
+const OBS = Object.keys(D.obs || {});
+function fmtObs(v) {
+  if (Array.isArray(v)) return v.length === 1 ? fmtObs(v[0])
+      : '[' + v.map(fmtObs).join(', ') + ']';
+  return String(+(+v).toFixed(3));
+}
+function obsCells(p) {
+  return OBS.map(n => {
+    const v = D.obs[n][cur][p];
+    const on = [].concat(v).flat(9).some(x => x);
+    return '<td class="obs' + (on ? ' on' : '') + '">' + fmtObs(v) + '</td>';
+  }).join('');
+}
+if (OBS.length) {
+  const th = $('obs-th');
+  th.outerHTML = OBS.map(n => '<th>' + n + '</th>').join('');
 }
 function drawChart() {
   const c = $('chart'), dpr = window.devicePixelRatio || 1;

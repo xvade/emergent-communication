@@ -9,6 +9,8 @@ actions/rewards are zero):
   rewards    float32 (T, N)           reward received on arriving at frame t
   actions    int32 (T, N, A)          action that led to frame t
   active     int16 (T,)               human-controlled player index, -1 if none
+  obs__NAME  (T, N, ...)              each small per-player observation, e.g.
+                                      obs__BINARY_COMMS (see small_observations)
 
 Two timestep formats are supported:
   * Substrate API (`meltingpot.substrate.build`): observation is a list of
@@ -50,6 +52,33 @@ def _jsonable(x: Any) -> Any:
   return repr(x)
 
 
+# Per-player observations not worth recording as data: images and the reward
+# (recorded separately).
+_SKIP_OBS = {'RGB', 'LAYER', 'REWARD'}
+
+
+def small_observations(obs: dict, max_size: int = 64) -> dict:
+  """The small numeric observations in one player's observation dict.
+
+  E.g. BINARY_COMMS, READY_TO_SHOOT, INVENTORY, POSITION: anything numeric
+  with at most `max_size` values, except images, WORLD.* and REWARD.
+  """
+  out = {}
+  for name, value in obs.items():
+    if name in _SKIP_OBS or name.startswith('WORLD.'):
+      continue
+    arr = np.asarray(value)
+    if arr.dtype.kind in 'biuf' and arr.size <= max_size:
+      out[name] = arr
+  return out
+
+
+def lab2d_player_observations(obs: dict, prefixes) -> list[dict]:
+  """Raw dmlab2d observations ('1.X') -> [small_observations per player]."""
+  return [small_observations({k.split('.', 1)[1]: v for k, v in obs.items()
+                              if k.startswith(f'{p}.')}) for p in prefixes]
+
+
 def _player_prefixes(obs: dict) -> list[str]:
   prefixes = {k.split('.', 1)[0] for k in obs if re.match(r'^\d+\.', k)}
   return sorted(prefixes, key=int)
@@ -74,6 +103,7 @@ class EpisodeRecorder:
     self._world, self._players = [], []
     self._rewards, self._actions, self._active = [], [], []
     self._events: list[list] = []
+    self._obs: list[list[dict]] = []  # per frame: [per player {name: array}]
     self.action_names: Optional[list[str]] = None
 
   def __len__(self):
@@ -81,7 +111,7 @@ class EpisodeRecorder:
 
   # -- generic entry point ------------------------------------------------
   def add(self, world, rewards, actions, players=None, active=-1,
-          events=None):
+          events=None, player_obs=None):
     self._world.append(np.asarray(world, dtype=np.uint8))
     self._rewards.append(np.asarray(rewards, dtype=np.float32))
     # actions=None (e.g. the reset frame) is filled with zeros in save(),
@@ -92,6 +122,7 @@ class EpisodeRecorder:
       self._players.append(np.stack(players).astype(np.uint8))
     self._active.append(active)
     self._events.append(_jsonable(events) if events else [])
+    self._obs.append(player_obs or [])
 
   # -- Substrate API --------------------------------------------------------
   def add_substrate_timestep(self, timestep, actions=None, events=None):
@@ -103,7 +134,8 @@ class EpisodeRecorder:
                else np.asarray(timestep.reward, dtype=np.float32))
     acts = None if actions is None else np.asarray(actions)
     players = [o['RGB'] for o in obs] if 'RGB' in obs[0] else None
-    self.add(obs[0]['WORLD.RGB'], rewards, acts, players, events=events)
+    self.add(obs[0]['WORLD.RGB'], rewards, acts, players, events=events,
+             player_obs=[small_observations(o) for o in obs])
 
   # -- raw dmlab2d API ------------------------------------------------------
   def add_lab2d_timestep(self, timestep, actions: Optional[dict] = None,
@@ -120,7 +152,8 @@ class EpisodeRecorder:
     players = None
     if all(f'{p}.RGB' in obs for p in prefixes):
       players = [obs[f'{p}.RGB'] for p in prefixes]
-    self.add(obs['WORLD.RGB'], rewards, acts, players, active, events)
+    self.add(obs['WORLD.RGB'], rewards, acts, players, active, events,
+             player_obs=lab2d_player_observations(obs, prefixes))
 
   # -- output ---------------------------------------------------------------
   def save(self, path_stem: str) -> str:
@@ -139,10 +172,24 @@ class EpisodeRecorder:
                   active=np.asarray(self._active, dtype=np.int16))
     if self._players and len(self._players) == len(self._world):
       arrays['players'] = np.stack(self._players)
+    # Small per-player observations present (with a fixed shape) in every
+    # frame for every player, e.g. obs__BINARY_COMMS with shape (T, N, ...).
+    obs_names = []
+    if self._obs and all(len(f) == rewards.shape[1] for f in self._obs):
+      names = set.intersection(*[set(p) for f in self._obs for p in f]) \
+          if rewards.shape[1] else set()
+      for name in sorted(names):
+        try:
+          arrays[f'obs__{name}'] = np.stack(
+              [np.stack([p[name] for p in f]) for f in self._obs])
+          obs_names.append(name)
+        except ValueError:  # shape changed during the episode; skip it
+          pass
     np.savez_compressed(path_stem + '.npz', **arrays)
     meta = dict(self.meta, steps=len(self._world) - 1,
                 num_players=int(rewards.shape[1]),
                 action_names=self.action_names or ['action'],
+                observation_names=obs_names,
                 total_rewards=rewards.sum(0).tolist(),
                 events=self._events)
     with open(path_stem + '.json', 'w') as f:
