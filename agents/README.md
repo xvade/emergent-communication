@@ -9,6 +9,9 @@
 | `experiments/` | Experiments (e.g. `random_zap_ablation.py`, `run.sbatch`) |
 | `tests/smoke_mpviz.py` | End-to-end check of mpviz (`sbatch agents/tests/smoke.sbatch`) |
 | `bin/mp-test-comms` | Slurm job that tests the configs in `configs/substrates/communication/` |
+| `commsjax/` | JAX port of the communication toy + IPPO training ([README](commsjax/README.md)) |
+| `experiments/socialjax/` | SocialJax env setup, GPU speed test, IPPO training check |
+| `docs/jax_meltingpot_options.md` | Survey of JAX Melting Pot options, with klone measurements |
 
 All commands below are run **from the repo root on a klone login node**. The
 launchers request their own small Slurm allocation; nothing heavy runs on the
