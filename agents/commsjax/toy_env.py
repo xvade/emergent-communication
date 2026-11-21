@@ -95,15 +95,19 @@ class ToyCommsEnv:
   obs_shape = (VIEW_SIZE, VIEW_SIZE, NUM_CHANNELS)
 
   def __init__(self, exists_prob=0.5, reward=1.0, max_steps=100,
-               random_orientation=True, fixed_roles=False):
+               random_orientation=True, fixed_roles=False, comm_enabled=True):
     """fixed_roles=True puts agent 0 in the apple room every episode (sender)
     and agent 1 in the pad room (receiver). This is useful with separate
-    networks. Default False matches the substrate (random rooms)."""
+    networks. Default False matches the substrate (random rooms).
+    comm_enabled=False removes the channel: the bit stays 0 and COMMUNICATE
+    does nothing. Observation and action spaces are unchanged, so the same
+    network trains as a no-communication baseline."""
     self.exists_prob = exists_prob
     self.reward = reward
     self.max_steps = max_steps
     self.random_orientation = random_orientation
     self.fixed_roles = fixed_roles
+    self.comm_enabled = comm_enabled
     self._wall = jnp.asarray(_WALL)
     self._spawns = jnp.array(SPAWNS, dtype=jnp.int32)
     self._apple = jnp.array(APPLE_XY, dtype=jnp.int32)
@@ -145,7 +149,7 @@ class ToyCommsEnv:
     blocked = blocked | jnp.all(target == other_target, axis=1) & moving
     new_pos = jnp.where(blocked[:, None], state.pos, target)
     new_dir = (state.dir + _TURN[actions]) % 4
-    comm = jnp.any(actions == COMM).astype(jnp.int32)
+    comm = jnp.any(actions == COMM).astype(jnp.int32) * int(self.comm_enabled)
 
     on_upper = jnp.all(new_pos == self._upper, axis=1) & moving & ~blocked
     on_lower = jnp.all(new_pos == self._lower, axis=1) & moving & ~blocked

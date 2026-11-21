@@ -1,7 +1,8 @@
 #!/bin/bash
 # Train IPPO on the JAX comms toy (one GPU). From repo root:
 #   sbatch agents/experiments/commsjax/train.sbatch [ppo.py flags]
-# e.g. sbatch agents/experiments/commsjax/train.sbatch --separate --seeds 8
+# e.g. sbatch agents/experiments/commsjax/train.sbatch --separate --fixed-roles --seeds 8
+# (--separate alone no longer implies fixed roles; at most 8 seeds per GPU)
 #SBATCH --job-name=cjax-train
 #SBATCH --account=amath
 #SBATCH --partition=gpu-l40s

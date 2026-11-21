@@ -3,18 +3,24 @@
 * Shared parameters (default): one network acts for both players and works out
   its role from what it sees. That matches the substrate, where rooms are
   assigned at random.
-* Separate parameters (`--separate`, implies fixed roles): agent 0 is always
-  the sender (apple room) and agent 1 the receiver (pad room), each with its
-  own network and optimizer. This is the setup a misaligned sender/receiver
-  needs.
+* Separate parameters (`--separate`): each agent has its own network and
+  optimizer.
+* `--fixed-roles`: agent 0 is always the sender (apple room) and agent 1 the
+  receiver (pad room). Independent of `--separate`, so the 2x2 of
+  shared/separate x random/fixed roles can be run. `--separate --fixed-roles`
+  is the setup a misaligned sender/receiver needs.
+* `--no-comm`: the channel is removed from the env (bit always 0, COMMUNICATE
+  does nothing). This trains the no-communication baseline pi_R0 for the
+  reliance gain Delta = J(pi_R) - J(pi_R0); `aggregate.py` computes Delta
+  from a comm run and a matched no-comm run.
 * Several seeds are trained in parallel with vmap (`--seeds`).
 
 Logged per update: success rate (correct pad / episodes), episode length, and
 how often the sender communicates when the apple is present vs. absent.
 After training, each seed is evaluated twice: normally, and with the comm bit
 zeroed in both players' observations. The difference is reported as
-`reliance_gain`, but it's an ablation drop, not the one-pager's Δ (which
-compares against a receiver trained without the channel).
+`ablation_drop`. It is not the one-pager's Delta, which compares against a
+receiver trained without the channel (`--no-comm`).
 
 Usage (SocialJax env, which has jax/flax/optax/distrax):
   python -m commsjax.ppo --total-steps 2e7 --seeds 4 --out results/run1
@@ -54,7 +60,7 @@ class ActorCritic(nn.Module):
 
 def make_train(cfg):
   env = ToyCommsEnv(exists_prob=cfg["exists_prob"], max_steps=cfg["max_steps"],
-                    fixed_roles=cfg["separate"])
+                    fixed_roles=cfg["fixed_roles"], comm_enabled=not cfg["no_comm"])
   E, T, A = cfg["num_envs"], cfg["num_steps"], env.num_agents
   num_updates = int(cfg["total_steps"] // (E * T))
   net = ActorCritic(env.num_actions)
@@ -199,7 +205,7 @@ def make_train(cfg):
     def f(c, _):
       obs, st, rng = c
       rng, k_a, k_s = jax.random.split(rng, 3)
-      o = obs.at[..., -1].set(0.0) if zero_comm else obs
+      o = obs.at[..., -1].multiply(1.0 - zero_comm)   # zero_comm: 0.0 or 1.0
       logits, _ = policy(params, o)
       act = distrax.Categorical(logits=logits).sample(seed=k_a)
       obs, st, _, done, info = jax.vmap(env.step)(jax.random.split(k_s, E), st, act)
@@ -226,7 +232,7 @@ DEFAULTS = dict(
     total_steps=2e7, num_envs=512, num_steps=128, lr=3e-4, update_epochs=4,
     num_minibatches=8, gamma=0.99, gae_lambda=0.95, clip=0.2, ent_coef=0.01,
     vf_coef=0.5, max_grad_norm=0.5, exists_prob=0.5, max_steps=100,
-    separate=False, eval_steps=500,
+    separate=False, fixed_roles=False, no_comm=False, eval_steps=500,
 )
 
 
@@ -262,6 +268,12 @@ def main():
   print(f"trained in {dt:.1f}s -> {total / dt:,.0f} env steps/s across {a.seeds} seeds "
         "(incl. learning)", flush=True)
 
+  try:
+    ms = jax.devices()[0].memory_stats() or {}
+    print(f"peak GPU memory: {ms.get('peak_bytes_in_use', 0) / 2**30:.1f} GiB", flush=True)
+  except Exception as e:  # CPU backend has no stats
+    print("peak GPU memory: n/a", e, flush=True)
+
   metrics = jax.tree.map(np.asarray, metrics)
   every = max(1, num_updates // 10)
   for s in range(a.seeds):
@@ -273,15 +285,20 @@ def main():
             f"{metrics['sender_comm_noapple'][s, u]:.2f} "
             f"ent={metrics['entropy'][s, u]:.2f}")
 
-  ev = jax.jit(jax.vmap(evaluate, in_axes=(0, 0, None)), static_argnums=2)
+  t0 = time.perf_counter()
+  ev = jax.jit(jax.vmap(evaluate, in_axes=(0, 0, None)))
   ek = jax.random.split(jax.random.PRNGKey(a.seed + 1000), a.seeds)
-  s_on, n_on = ev(params, ek, False)
-  s_off, n_off = ev(params, ek, True)
+  s_on, n_on = ev(params, ek, 0.0)
+  s_off, n_off = ev(params, ek, 1.0)
+  s_on, s_off = np.asarray(s_on), np.asarray(s_off)
+  print(f"evaluated in {time.perf_counter() - t0:.1f}s", flush=True)
   results = []
   print("== evaluation (sampled actions) ==")
   for s in range(a.seeds):
-    r = dict(seed=s, success=float(s_on[s]), success_comm_zeroed=float(s_off[s]),
-             reliance_gain=float(s_on[s] - s_off[s]), episodes=int(n_on[s]))
+    r = dict(seed=a.seed, index=s, success=float(s_on[s]),
+             success_comm_zeroed=float(s_off[s]),
+             ablation_drop=float(s_on[s] - s_off[s]), episodes=int(n_on[s]),
+             train_success_last10=float(metrics["success"][s, -10:].mean()))
     results.append(r)
     print(json.dumps(r))
   learned = sum(r["success"] > 0.9 for r in results)

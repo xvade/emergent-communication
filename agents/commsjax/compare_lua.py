@@ -1,6 +1,6 @@
 """Compare the JAX toy (commsjax.toy_env) against the real Lua substrate.
 
-Runs in the Melting Pot container (uses the checkout's toy config and Lua):
+Runs in the Melting Pot container (uses the checkout's toy_binary config and Lua):
   sbatch agents/experiments/commsjax/compare_lua.sbatch
 
 Measures, on the Lua toy:
@@ -26,7 +26,9 @@ from mpviz import source  # noqa: E402
 import check_substrate  # noqa: E402
 import checks_toy  # noqa: E402
 
-TOY = REPO / 'meltingpot/meltingpot/configs/substrates/communication/toy.py'
+# The one-bit game. Since fork commit 83b2461, toy.py is the no-communication
+# base and the binary channel lives in toy_binary.py.
+TOY = REPO / 'meltingpot/meltingpot/configs/substrates/communication/toy_binary.py'
 DIRS = {0: (0, -1), 1: (1, 0), 2: (0, 1), 3: (-1, 0)}
 
 

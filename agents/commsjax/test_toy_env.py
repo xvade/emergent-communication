@@ -86,6 +86,11 @@ check(np.all(np.asarray(o)[..., CH["comm_bit"]] == 0), "bit resets next step whe
 o, _ = env.reset(jax.random.PRNGKey(3))
 check(np.all(np.asarray(o)[..., CH["comm_bit"]] == 0), "bit=0 at reset")
 
+env_nc = T.ToyCommsEnv(comm_enabled=False)
+o, s, _, _, info = env_nc.step_env(s0, jnp.array([T.COMM, T.COMM]))
+check(np.all(np.asarray(o)[..., CH["comm_bit"]] == 0) and int(info["comm"]) == 0,
+      "comm_enabled=False: bit stays 0 after COMMUNICATE")
+
 # --- pads: reward and termination for each (apple, pad) ------------------
 for apple in (True, False):
   for pad, d in (("upper", 0), ("lower", 2)):
